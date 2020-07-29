@@ -51,22 +51,28 @@
 
 #define A52_FRAME_NB 1536
 
-struct aout_sys_t
+typedef struct
 {
     int fd;
     audio_sample_format_t format;
     bool starting;
-
-    bool mute;
-    uint8_t level;
+    bool soft_mute;
+    float soft_gain;
     char *device;
-};
+} aout_sys_t;
+
+#include "volume.h"
 
 static int Open (vlc_object_t *);
 static void Close (vlc_object_t *);
 
 #define AUDIO_DEV_TEXT N_("Audio output device")
 #define AUDIO_DEV_LONGTEXT N_("OSS device node path.")
+
+#define SPDIF_TEXT N_("Use S/PDIF when available")
+#define SPDIF_LONGTEXT N_( \
+    "S/PDIF can be used by default when " \
+    "your hardware supports it as well as the audio stream being played.")
 
 vlc_module_begin ()
     set_shortname( "OSS" )
@@ -75,19 +81,23 @@ vlc_module_begin ()
     set_subcategory( SUBCAT_AUDIO_AOUT )
     add_string ("oss-audio-device", "",
                 AUDIO_DEV_TEXT, AUDIO_DEV_LONGTEXT, false)
+    add_bool("oss-spdif", false, SPDIF_TEXT, SPDIF_LONGTEXT, true)
+    add_sw_gain ()
     set_capability( "audio output", 100 )
     set_callbacks (Open, Close)
 vlc_module_end ()
 
-static int TimeGet (audio_output_t *, mtime_t *);
-static void Play (audio_output_t *, block_t *);
-static void Pause (audio_output_t *, bool, mtime_t);
-static void Flush (audio_output_t *, bool);
-static int VolumeSync (audio_output_t *);
+static int TimeGet (audio_output_t *, vlc_tick_t *);
+static void Play(audio_output_t *, block_t *, vlc_tick_t);
+static void Pause (audio_output_t *, bool, vlc_tick_t);
+static void Flush (audio_output_t *);
 
 static int Start (audio_output_t *aout, audio_sample_format_t *restrict fmt)
 {
     aout_sys_t* sys = aout->sys;
+
+    if (aout_FormatNbChannels(fmt) == 0)
+        return VLC_EGENERIC;
 
     /* Open the device */
     const char *device = sys->device;
@@ -103,7 +113,6 @@ static int Start (audio_output_t *aout, audio_sample_format_t *restrict fmt)
                  vlc_strerror_c(errno));
         return VLC_EGENERIC;
     }
-    sys->fd = fd;
     msg_Dbg (aout, "using OSS device: %s", device);
 
     /* Select audio format */
@@ -129,7 +138,7 @@ static int Start (audio_output_t *aout, audio_sample_format_t *restrict fmt)
             break;
         default:
             if (AOUT_FMT_SPDIF(fmt))
-                spdif = var_InheritBool (aout, "spdif");
+                spdif = var_InheritBool(aout, "oss-spdif");
             if (spdif)
                 format = AFMT_AC3;
 #ifdef AFMT_FLOAT
@@ -210,21 +219,38 @@ static int Start (audio_output_t *aout, audio_sample_format_t *restrict fmt)
     else
     {
         fmt->i_rate = rate;
-        fmt->i_original_channels =
         fmt->i_physical_channels = channels;
     }
+    fmt->channel_type = AUDIO_CHANNEL_TYPE_BITMAP;
     aout_FormatPrepare (fmt);
 
-    VolumeSync (aout);
+    /* Select timing */
+    uint32_t bytes;
+    if (spdif)
+        bytes = AOUT_SPDIF_SIZE;
+    else
+        bytes = fmt->i_rate / (CLOCK_FREQ / AOUT_MIN_PREPARE_TIME)
+                * fmt->i_bytes_per_frame;
+    if (unlikely(bytes < 16))
+        bytes = 16;
+
+    int frag = (AOUT_MAX_ADVANCE_TIME / AOUT_MIN_PREPARE_TIME) << 16
+             | (32 - clz(bytes - 1));
+    if (ioctl (fd, SNDCTL_DSP_SETFRAGMENT, &frag) < 0)
+        msg_Err (aout, "cannot set 0x%08x fragment: %s", frag,
+                 vlc_strerror_c(errno));
+
+    sys->fd = fd;
+    aout_SoftVolumeStart (aout);
     sys->starting = true;
     sys->format = *fmt;
     return VLC_SUCCESS;
 error:
-    close (fd);
+    vlc_close (fd);
     return VLC_EGENERIC;
 }
 
-static int TimeGet (audio_output_t *aout, mtime_t *restrict pts)
+static int TimeGet (audio_output_t *aout, vlc_tick_t *restrict pts)
 {
     aout_sys_t *sys = aout->sys;
     int delay;
@@ -235,15 +261,15 @@ static int TimeGet (audio_output_t *aout, mtime_t *restrict pts)
         return -1;
     }
 
-    *pts = (delay * CLOCK_FREQ * sys->format.i_frame_length)
-                        / (sys->format.i_rate * sys->format.i_bytes_per_frame);
+    *pts = vlc_tick_from_samples(delay * sys->format.i_frame_length,
+                        sys->format.i_rate * sys->format.i_bytes_per_frame);
     return 0;
 }
 
 /**
  * Queues one audio buffer to the hardware.
  */
-static void Play (audio_output_t *aout, block_t *block)
+static void Play(audio_output_t *aout, block_t *block, vlc_tick_t date)
 {
     aout_sys_t *sys = aout->sys;
     int fd = sys->fd;
@@ -260,15 +286,13 @@ static void Play (audio_output_t *aout, block_t *block)
             msg_Err (aout, "cannot write samples: %s", vlc_strerror_c(errno));
     }
     block_Release (block);
-
-    /* Dumb OSS cannot send any kind of events for this... */
-    VolumeSync (aout);
+    (void) date;
 }
 
 /**
  * Pauses/resumes the audio playback.
  */
-static void Pause (audio_output_t *aout, bool pause, mtime_t date)
+static void Pause (audio_output_t *aout, bool pause, vlc_tick_t date)
 {
     aout_sys_t *sys = aout->sys;
     int fd = sys->fd;
@@ -278,33 +302,14 @@ static void Pause (audio_output_t *aout, bool pause, mtime_t date)
 }
 
 /**
- * Flushes/drains the audio playback buffer.
+ * Flushes the audio playback buffer.
  */
-static void Flush (audio_output_t *aout, bool wait)
+static void Flush (audio_output_t *aout)
 {
     aout_sys_t *sys = aout->sys;
     int fd = sys->fd;
 
-    if (wait)
-        return; /* drain is implicit with OSS */
     ioctl (fd, SNDCTL_DSP_HALT, NULL);
-}
-
-static int VolumeSync (audio_output_t *aout)
-{
-    aout_sys_t *sys = aout->sys;
-    int fd = sys->fd;
-
-    int level;
-    if (ioctl (fd, SNDCTL_DSP_GETPLAYVOL, &level) < 0)
-        return -1;
-
-    sys->mute = !level;
-    if (level) /* try to keep last volume before mute */
-        sys->level = level;
-    aout_MuteReport (aout, !level);
-    aout_VolumeReport (aout, (float)(level & 0xFF) / 100.f);
-    return 0;
 }
 
 /**
@@ -316,50 +321,8 @@ static void Stop (audio_output_t *aout)
     int fd = sys->fd;
 
     ioctl (fd, SNDCTL_DSP_HALT, NULL);
-    close (fd);
+    vlc_close (fd);
     sys->fd = -1;
-}
-
-static int VolumeSet (audio_output_t *aout, float vol)
-{
-    aout_sys_t *sys = aout->sys;
-    int fd = sys->fd;
-    if (fd == -1)
-        return -1;
-
-    int level = lroundf (vol * 100.f);
-    if (level > 0xFF)
-        level = 0xFFFF;
-    else
-        level |= level << 8;
-    if (!sys->mute && ioctl (fd, SNDCTL_DSP_SETPLAYVOL, &level) < 0)
-    {
-        msg_Err (aout, "cannot set volume: %s", vlc_strerror_c(errno));
-        return -1;
-    }
-
-    sys->level = level;
-    aout_VolumeReport (aout, (float)(level & 0xFF) / 100.f);
-    return 0;
-}
-
-static int MuteSet (audio_output_t *aout, bool mute)
-{
-    aout_sys_t *sys = aout->sys;
-    int fd = sys->fd;
-    if (fd == -1)
-        return -1;
-
-    int level = mute ? 0 : (sys->level | (sys->level << 8));
-    if (ioctl (fd, SNDCTL_DSP_SETPLAYVOL, &level) < 0)
-    {
-        msg_Err (aout, "cannot mute: %s", vlc_strerror_c(errno));
-        return -1;
-    }
-
-    sys->mute = mute;
-    aout_MuteReport (aout, mute);
-    return 0;
 }
 
 static int DevicesEnum (audio_output_t *aout)
@@ -401,7 +364,7 @@ static int DevicesEnum (audio_output_t *aout)
         n++;
     }
 out:
-    close (fd);
+    vlc_close (fd);
     return n;
 }
 
@@ -433,17 +396,14 @@ static int Open (vlc_object_t *obj)
         return VLC_ENOMEM;
 
     sys->fd = -1;
-
-    sys->level = 100;
-    sys->mute = false;
     sys->device = var_InheritString (aout, "oss-audio-device");
 
     aout->sys = sys;
     aout->start = Start;
     aout->stop = Stop;
-    aout->volume_set = VolumeSet;
-    aout->mute_set = MuteSet;
     aout->device_select = DeviceSelect;
+    aout_DeviceReport (aout, sys->device);
+    aout_SoftVolumeInit (aout);
 
     DevicesEnum (aout);
     return VLC_SUCCESS;

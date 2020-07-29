@@ -2,7 +2,6 @@
  * bluescreen.c : Bluescreen (weather channel like) video filter for vlc
  *****************************************************************************
  * Copyright (C) 2005-2007 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Antoine Cellerier <dionoea at videolan tod org>
  *
@@ -32,6 +31,7 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_filter.h>
+#include <vlc_picture.h>
 
 #define BLUESCREEN_HELP N_( \
     "This effect, also known as \"greenscreen\" or \"chroma key\" blends " \
@@ -79,7 +79,7 @@ vlc_module_begin ()
     set_help( BLUESCREEN_HELP )
     set_category( CAT_VIDEO )
     set_subcategory( SUBCAT_VIDEO_VFILTER )
-    set_capability( "video filter2", 0 )
+    set_capability( "video filter", 0 )
     add_shortcut( "bluescreen" )
     set_callbacks( Create, Destroy )
 
@@ -99,12 +99,12 @@ static const char *const ppsz_filter_options[] = {
     "u", "v", "ut", "vt", NULL
 };
 
-struct filter_sys_t
+typedef struct
 {
     vlc_mutex_t lock;
     int i_u, i_v, i_ut, i_vt;
     uint8_t *p_at;
-};
+} filter_sys_t;
 
 static int Create( vlc_object_t *p_this )
 {
@@ -159,7 +159,6 @@ static void Destroy( vlc_object_t *p_this )
     var_DelCallback( p_filter, CFG_PREFIX "vt", BluescreenCallback, p_sys );
 
     free( p_sys->p_at );
-    vlc_mutex_destroy( &p_sys->lock );
     free( p_sys );
 }
 
@@ -167,7 +166,6 @@ static picture_t *Filter( filter_t *p_filter, picture_t *p_pic )
 {
     filter_sys_t *p_sys = p_filter->p_sys;
 
-    int i,j;
     int i_lines = p_pic->p[ A_PLANE ].i_lines;
     int i_pitch = p_pic->p[ A_PLANE ].i_pitch;
     uint8_t *p_a = p_pic->p[ A_PLANE ].p_pixels;
@@ -196,7 +194,7 @@ static picture_t *Filter( filter_t *p_filter, picture_t *p_pic )
     vmax = p_sys->i_v + p_sys->i_vt <= 0xff ? p_sys->i_v + p_sys->i_vt : 0xff;
     vlc_mutex_unlock( &p_sys->lock );
 
-    for( i = 0; i < i_lines*i_pitch; i++ )
+    for( int i = 0; i < i_lines*i_pitch; i++ )
     {
         if(    p_u[i] < umax && p_u[i] > umin
             && p_v[i] < vmax && p_v[i] > vmin )
@@ -210,11 +208,11 @@ static picture_t *Filter( filter_t *p_filter, picture_t *p_pic )
     }
     /* Gaussian convolution to make it look cleaner */
     memset( p_a, 0, 2 * i_pitch );
-    for( i = 2; i < i_lines - 2; i++ )
+    for( int i = 2; i < i_lines - 2; i++ )
     {
         p_a[i*i_pitch] = 0x00;
         p_a[i*i_pitch+1] = 0x00;
-        for( j = 2; j < i_pitch - 2; j ++ )
+        for( int j = 2; j < i_pitch - 2; j++ )
         {
             p_a[i*i_pitch+j] = (uint8_t)((
               /* 2 rows up */

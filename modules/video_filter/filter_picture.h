@@ -2,7 +2,6 @@
  * filter_picture.h: Common picture functions for filters
  *****************************************************************************
  * Copyright (C) 2007 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Antoine Cellerier <dionoea at videolan dot org>
  *
@@ -36,13 +35,24 @@
         case VLC_CODEC_I422:   \
         case VLC_CODEC_J422:
 
+#define CASE_PLANAR_YUV10                   \
+        case VLC_CODEC_I420_10L:            \
+        case VLC_CODEC_I420_10B:            \
+        case VLC_CODEC_I444_10L:            \
+        case VLC_CODEC_I444_10B:
+
+#define CASE_PLANAR_YUV9                    \
+        case VLC_CODEC_I420_9L:             \
+        case VLC_CODEC_I420_9B:             \
+        case VLC_CODEC_I444_9L:             \
+        case VLC_CODEC_I444_9B:
+
 #define CASE_PLANAR_YUV                     \
         CASE_PLANAR_YUV_SQUARE              \
         CASE_PLANAR_YUV_NONSQUARE           \
 
 #define CASE_PACKED_YUV_422                 \
         case VLC_CODEC_UYVY:   \
-        case VLC_CODEC_CYUV:   \
         case VLC_CODEC_YUYV:   \
         case VLC_CODEC_YVYU:
 
@@ -52,7 +62,6 @@ static inline int GetPackedYuvOffsets( vlc_fourcc_t i_chroma,
     switch( i_chroma )
     {
         case VLC_CODEC_UYVY:
-        case VLC_CODEC_CYUV: /* <-- FIXME: reverted, whatever that means */
             /* UYVY */
             *i_y_offset = 1;
             *i_u_offset = 0;
@@ -88,14 +97,14 @@ static inline int GetPackedRgbIndexes( const video_format_t *p_fmt, int *i_r_ind
         return VLC_EGENERIC;
 
 #ifdef WORDS_BIGENDIAN
-    const int i_mask_bits = p_fmt->i_chroma == VLC_CODEC_RGB24 ? 24 : 32;
-    *i_r_index = ( i_mask_bits - p_fmt->i_lrshift ) / 8;
-    *i_g_index = ( i_mask_bits - p_fmt->i_lgshift ) / 8;
-    *i_b_index = ( i_mask_bits - p_fmt->i_lbshift ) / 8;
+    const int i_mask_bits = p_fmt->i_chroma == VLC_CODEC_RGB24 ? 16 : 24;
+    *i_r_index = (i_mask_bits - vlc_ctz(p_fmt->i_rmask)) / 8;
+    *i_g_index = (i_mask_bits - vlc_ctz(p_fmt->i_gmask)) / 8;
+    *i_b_index = (i_mask_bits - vlc_ctz(p_fmt->i_bmask)) / 8;
 #else
-    *i_r_index = p_fmt->i_lrshift / 8;
-    *i_g_index = p_fmt->i_lgshift / 8;
-    *i_b_index = p_fmt->i_lbshift / 8;
+    *i_r_index = vlc_ctz(p_fmt->i_rmask) / 8;
+    *i_g_index = vlc_ctz(p_fmt->i_gmask) / 8;
+    *i_b_index = vlc_ctz(p_fmt->i_bmask) / 8;
 #endif
     return VLC_SUCCESS;
 }

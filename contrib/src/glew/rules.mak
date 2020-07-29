@@ -1,23 +1,22 @@
 # GLEW
-GLEW_VERSION := 1.7.0
+GLEW_VERSION := 2.1.0
 GLEW_URL := $(SF)/glew/glew/$(GLEW_VERSION)/glew-$(GLEW_VERSION).tgz
 
-$(TARBALLS)/glew-$(GLEW_VERSION).tar.gz:
-	$(call download,$(GLEW_URL))
-
-.sum-glew: glew-$(GLEW_VERSION).tar.gz
-
-glew: glew-$(GLEW_VERSION).tar.gz .sum-glew
-	$(UNPACK)
-ifdef HAVE_WIN32
-	$(APPLY) $(SRC)/glew/win32.patch
+ifeq ($(call need_pkg,"glew"),)
+PKGS_FOUND += glew
 endif
+
+$(TARBALLS)/glew-$(GLEW_VERSION).tgz:
+	$(call download_pkg,$(GLEW_URL),glew)
+
+.sum-glew: glew-$(GLEW_VERSION).tgz
+
+glew: glew-$(GLEW_VERSION).tgz .sum-glew
+	$(UNPACK)
+	$(APPLY) $(SRC)/glew/glew-drop-debug-postfix.patch
 	$(MOVE)
 
-.glew: glew
-	cd $< && $(HOSTVARS) CFLAGS="$(CFLAGS) -DGLEW_STATIC" $(MAKE)
-	cd $< && $(HOSTVARS) GLEW_DEST=$(PREFIX) $(MAKE) install
-ifdef HAVE_WIN32
-	-rm $(PREFIX)/lib/*glew32.dll*
-endif
+.glew: glew toolchain.cmake
+	cd $</build/cmake && $(HOSTVARS_PIC) $(CMAKE) -DBUILD_SHARED_LIBS:BOOL=OFF -DGLEW_USE_STATIC_LIBS:BOOL=ON
+	cd $</build/cmake && $(MAKE) install
 	touch $@

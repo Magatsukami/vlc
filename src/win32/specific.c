@@ -25,15 +25,16 @@
 # include "config.h"
 #endif
 
-#define UNICODE
+#ifndef UNICODE
+# define UNICODE
+#endif
 #include <vlc_common.h>
 #include "libvlc.h"
 #include "../lib/libvlc_internal.h"
 #include "config/vlc_getopt.h"
 
 #include <mmsystem.h>
-#include <winsock.h>
-
+#include <winsock2.h>
 
 static int system_InitWSA(int hi, int lo)
 {
@@ -54,10 +55,6 @@ static int system_InitWSA(int hi, int lo)
  */
 void system_Init(void)
 {
-#if !VLC_WINSTORE_APP
-    timeBeginPeriod(5);
-#endif
-
     if (system_InitWSA(2, 2) && system_InitWSA(1, 1))
         fputs("Error: cannot initialize Winsocks\n", stderr);
 }
@@ -77,23 +74,6 @@ typedef struct
 void system_Configure( libvlc_int_t *p_this, int i_argc, const char *const ppsz_argv[] )
 {
 #if !VLC_WINSTORE_APP
-    /* Raise default priority of the current process */
-#ifndef ABOVE_NORMAL_PRIORITY_CLASS
-#   define ABOVE_NORMAL_PRIORITY_CLASS 0x00008000
-#endif
-    if( var_InheritBool( p_this, "high-priority" ) )
-    {
-        if( SetPriorityClass( GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS )
-             || SetPriorityClass( GetCurrentProcess(), HIGH_PRIORITY_CLASS ) )
-        {
-            msg_Dbg( p_this, "raised process priority" );
-        }
-        else
-        {
-            msg_Dbg( p_this, "could not raise process priority" );
-        }
-    }
-
     if( var_InheritBool( p_this, "one-instance" )
      || ( var_InheritBool( p_this, "one-instance-when-started-from-file" )
        && var_InheritBool( p_this, "started-from-file" ) ) )
@@ -114,7 +94,7 @@ void system_Configure( libvlc_int_t *p_this, int i_argc, const char *const ppsz_
 
         if( GetLastError() != ERROR_ALREADY_EXISTS )
         {
-            libvlc_InternalAddIntf( p_this, "win32msg,none" );
+            libvlc_InternalAddIntf( p_this, "win_msg,none" );
             /* Initialization done.
              * Release the mutex to unblock other instances */
             ReleaseMutex( hmutex );
@@ -193,10 +173,6 @@ void system_Configure( libvlc_int_t *p_this, int i_argc, const char *const ppsz_
  */
 void system_End(void)
 {
-#if !VLC_WINSTORE_APP
-    timeEndPeriod(5);
-#endif
-
     /* XXX: In theory, we should not call this if WSAStartup() failed. */
     WSACleanup();
 }

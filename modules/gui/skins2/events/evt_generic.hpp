@@ -2,7 +2,6 @@
  * evt_generic.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -36,7 +35,7 @@ public:
     virtual ~EvtGeneric() { }
 
     /// Return the type of the event
-    virtual const string getAsString() const = 0;
+    virtual const std::string getAsString() const = 0;
 
 protected:
     EvtGeneric( intf_thread_t *pIntf ): SkinObject( pIntf ) { }

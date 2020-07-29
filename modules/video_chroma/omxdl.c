@@ -25,6 +25,7 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_filter.h>
+#include <vlc_picture.h>
 #include <omxtypes.h>
 #include <omxIP.h>
 
@@ -33,8 +34,8 @@ static int OpenScaler (vlc_object_t *);
 
 vlc_module_begin ()
     set_description (N_("OpenMAX DL image processing"))
-    set_capability ("video filter2", 90)
-    set_callbacks (Open, NULL)
+    set_capability ("video converter", 90)
+    set_callback(Open)
 vlc_module_end ()
 
 #define SRC_WIDTH  (filter->fmt_in.video.i_width)
@@ -249,6 +250,9 @@ static int Open (vlc_object_t *obj)
 {
     filter_t *filter = (filter_t *)obj;
 
+    if (filter->fmt_in.video.orientation != filter->fmt_out.video.orientation)
+        return VLC_EGENERIC;
+
     if ((filter->fmt_in.video.i_width != filter->fmt_out.video.i_width)
      || (filter->fmt_in.video.i_height != filter->fmt_out.video.i_height))
         return OpenScaler (obj);
@@ -338,7 +342,7 @@ static int Open (vlc_object_t *obj)
     (OMX_INT)(((float)((SRC_WIDTH  & ~1) - 1)) / ((DST_WIDTH  & ~1) - 1) * (1 << 16) + .5)
 #define YRR_MAX \
   (OMX_INT)(((float)((SRC_HEIGHT & ~1) - 1)) / ((DST_HEIGHT & ~1) - 1) * (1 << 16) + .5)
-#define CNV ((intptr_t)(filter->p_sys))
+#define CNV (*(int *)(filter->p_sys))
 
 /*** Scaling from I420 ***/
 static void I420_I420_Scale (filter_t *filter, picture_t *src, picture_t *dst)
@@ -467,6 +471,12 @@ VIDEO_FILTER_WRAPPER (I422_RGB_Scale)
 static int OpenScaler (vlc_object_t *obj)
 {
     filter_t *filter = (filter_t *)obj;
+    int *conv = vlc_obj_malloc(obj, sizeof (*conv));
+
+    if (unlikely(conv == NULL))
+        return VLC_ENOMEM;
+
+    filter->p_sys = conv;
 
     switch (filter->fmt_in.video.i_chroma)
     {
@@ -483,25 +493,25 @@ static int OpenScaler (vlc_object_t *obj)
                     if (FixRV16 (&filter->fmt_out.video))
                         return VLC_EGENERIC;
                     filter->pf_video_filter = I420_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR565;
+                    *conv = OMX_IP_BGR565;
                     return VLC_SUCCESS;
                 case VLC_CODEC_RGB15:
                     if (FixRV15 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = I420_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR555;
+                    *conv = OMX_IP_BGR555;
                     return VLC_SUCCESS;
                 case VLC_CODEC_RGB12:
                     if (FixRV12 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = I420_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR444;
+                    *conv = OMX_IP_BGR444;
                     return VLC_SUCCESS;
                 case VLC_CODEC_RGB24:
                     if (FixRV24 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = I420_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR888;
+                    *conv = OMX_IP_BGR888;
                     return VLC_SUCCESS;
             }
             break;
@@ -519,25 +529,25 @@ static int OpenScaler (vlc_object_t *obj)
                     if (FixRV16 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = YV12_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR565;
+                    *conv = OMX_IP_BGR565;
                     return VLC_SUCCESS;
                 case VLC_CODEC_RGB15:
                     if (FixRV15 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = YV12_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR555;
+                    *conv = OMX_IP_BGR555;
                     return VLC_SUCCESS;
                 case VLC_CODEC_RGB12:
                     if (FixRV12 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = YV12_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR444;
+                    *conv = OMX_IP_BGR444;
                     return VLC_SUCCESS;
                 case VLC_CODEC_RGB24:
                     if (FixRV24 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = YV12_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR888;
+                    *conv = OMX_IP_BGR888;
                     return VLC_SUCCESS;
             }
             break;
@@ -552,25 +562,25 @@ static int OpenScaler (vlc_object_t *obj)
                     if (FixRV16 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = I422_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR565;
+                    *conv = OMX_IP_BGR565;
                     return VLC_SUCCESS;
                 case VLC_CODEC_RGB15:
                     if (FixRV15 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = I422_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR555;
+                    *conv = OMX_IP_BGR555;
                     return VLC_SUCCESS;
                 case VLC_CODEC_RGB12:
                     if (FixRV12 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = I422_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR444;
+                    *conv = OMX_IP_BGR444;
                     return VLC_SUCCESS;
                 case VLC_CODEC_RGB24:
                     if (FixRV24 (&filter->fmt_out.video))
                         break;
                     filter->pf_video_filter = I422_RGB_Scale_Filter;
-                    filter->p_sys = (void *)(intptr_t)OMX_IP_BGR888;
+                    *conv = OMX_IP_BGR888;
                     return VLC_SUCCESS;
             }
             break;

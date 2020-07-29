@@ -2,7 +2,6 @@
  * dialog.c: Functions to create interface dialogs from Lua extensions
  *****************************************************************************
  * Copyright (C) 2009-2010 VideoLAN and authors
- * $Id$
  *
  * Authors: Jean-Philippe André < jpeg # videolan.org >
  *
@@ -33,6 +32,7 @@
 #endif
 
 #include <vlc_common.h>
+#include <vlc_dialog.h>
 #include <vlc_extensions.h>
 
 #include "../vlc.h"
@@ -249,9 +249,9 @@ static int vlclua_dialog_delete( lua_State *L )
     msg_Dbg( p_mgr, "Deleting dialog '%s'", p_dlg->psz_title );
     p_dlg->b_kill = true;
     lua_SetDialogUpdate( L, 0 ); // Reset the update flag
-    dialog_ExtensionUpdate( p_mgr, p_dlg );
+    vlc_ext_dialog_update( p_mgr, p_dlg );
 
-    /* After dialog_ExtensionUpdate, the UI thread must take the lock asap and
+    /* After vlc_ext_dialog_update, the UI thread must take the lock asap and
      * then signal us when it's done deleting the dialog.
      */
     msg_Dbg( p_mgr, "Waiting for the dialog to be deleted..." );
@@ -267,7 +267,7 @@ static int vlclua_dialog_delete( lua_State *L )
 
     /* Destroy widgets */
     extension_widget_t *p_widget;
-    FOREACH_ARRAY( p_widget, p_dlg->widgets )
+    ARRAY_FOREACH( p_widget, p_dlg->widgets )
     {
         if( !p_widget )
             continue;
@@ -281,14 +281,13 @@ static int vlclua_dialog_delete( lua_State *L )
             free( p_value->psz_text );
             free( p_value );
         }
+        free( p_widget );
     }
-    FOREACH_END()
 
     ARRAY_RESET( p_dlg->widgets );
 
     /* Note: At this point, the UI must not use these resources */
-    vlc_mutex_destroy( &p_dlg->lock );
-    vlc_cond_destroy( &p_dlg->cond );
+    free( p_dlg );
 
     return 1;
 }
@@ -358,7 +357,7 @@ static int vlclua_dialog_update( lua_State *L )
     extension_dialog_t *p_dlg = *pp_dlg;
 
     // Updating dialog immediately
-    dialog_ExtensionUpdate( p_mgr, p_dlg );
+    vlc_ext_dialog_update( p_mgr, p_dlg );
 
     // Reset update flag
     lua_SetDialogUpdate( L, 0 );
@@ -400,7 +399,7 @@ int lua_DialogFlush( lua_State *L )
     int i_ret = VLC_SUCCESS;
     if( lua_GetDialogUpdate( L ) )
     {
-        i_ret = dialog_ExtensionUpdate( vlclua_get_this( L ), p_dlg );
+        i_ret = vlc_ext_dialog_update( vlclua_get_this( L ), p_dlg );
         lua_SetDialogUpdate( L, 0 );
     }
 
@@ -996,7 +995,7 @@ static int vlclua_dialog_delete_widget( lua_State *L )
     p_widget->b_kill = true;
 
     lua_SetDialogUpdate( L, 0 ); // Reset update flag
-    int i_ret = dialog_ExtensionUpdate( p_mgr, p_dlg );
+    int i_ret = vlc_ext_dialog_update( p_mgr, p_dlg );
 
     if( i_ret != VLC_SUCCESS )
     {
@@ -1055,7 +1054,7 @@ static int DeleteWidget( extension_dialog_t *p_dialog,
     int pos = -1;
     bool found = false;
     extension_widget_t *p_iter;
-    FOREACH_ARRAY( p_iter, p_dialog->widgets )
+    ARRAY_FOREACH( p_iter, p_dialog->widgets )
     {
         pos++;
         if( p_iter == p_widget )
@@ -1064,7 +1063,6 @@ static int DeleteWidget( extension_dialog_t *p_dialog,
             break;
         }
     }
-    FOREACH_END()
 
     if( !found )
         return VLC_EGENERIC;

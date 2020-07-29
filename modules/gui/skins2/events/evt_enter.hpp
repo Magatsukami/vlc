@@ -2,7 +2,6 @@
  * evt_enter.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -34,7 +33,7 @@ class EvtEnter: public EvtInput
 public:
     EvtEnter( intf_thread_t *pIntf ): EvtInput( pIntf ) { }
     virtual ~EvtEnter() { }
-    virtual const string getAsString() const { return "enter"; }
+    virtual const std::string getAsString() const { return "enter"; }
 };
 
 

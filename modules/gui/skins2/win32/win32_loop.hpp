@@ -2,7 +2,6 @@
  * win32_loop.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -59,7 +58,7 @@ private:
 
     /// Map associating special (i.e. non ascii) virtual key codes with
     /// internal vlc key codes
-    map<int, int> virtKeyToVlcKey;
+    std::map<int, int> virtKeyToVlcKey;
 
     /// Helper function to find the modifier in a Windows message
     int getMod( WPARAM wParam ) const;

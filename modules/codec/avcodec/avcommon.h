@@ -2,7 +2,6 @@
  * avcommon.h: common code for libav*
  *****************************************************************************
  * Copyright (C) 2012 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Rafaël Carré <funman@videolanorg>
  *
@@ -31,33 +30,50 @@
 #include <vlc_avcodec.h>
 #include <vlc_configuration.h>
 #include <vlc_variables.h>
+#include <vlc_es.h>
 
 #include <limits.h>
 
 #include "avcommon_compat.h"
 
-
 #ifdef HAVE_LIBAVUTIL_AVUTIL_H
 # include <libavutil/avutil.h>
 # include <libavutil/dict.h>
+# include <libavutil/cpu.h>
 # include <libavutil/log.h>
 
-#define AV_OPTIONS_TEXT     "Advanced options"
-#define AV_OPTIONS_LONGTEXT "Advanced options, in the form {opt=val,opt2=val2}."
+#if (CLOCK_FREQ == AV_TIME_BASE)
+#define FROM_AV_TS(x)  (x)
+#define TO_AV_TS(x)    (x)
+#elif (CLOCK_FREQ % AV_TIME_BASE) == 0
+#define FROM_AV_TS(x)  ((x) * (CLOCK_FREQ / AV_TIME_BASE))
+#define TO_AV_TS(x)    ((x) / (CLOCK_FREQ / AV_TIME_BASE))
+#elif (AV_TIME_BASE % CLOCK_FREQ) == 0
+#define FROM_AV_TS(x)  ((x) / (AV_TIME_BASE / CLOCK_FREQ))
+#define TO_AV_TS(x)    ((x) * (AV_TIME_BASE / CLOCK_FREQ))
+#else
+#define FROM_AV_TS(x)  ((x) * CLOCK_FREQ / AV_TIME_BASE)
+#define TO_AV_TS(x)    ((x) * AV_TIME_BASE / CLOCK_FREQ)
+#endif
 
-static inline AVDictionary *vlc_av_get_options(const char *psz_opts)
+#define AV_OPTIONS_TEXT     N_("Advanced options")
+#define AV_OPTIONS_LONGTEXT N_("Advanced options, in the form {opt=val,opt2=val2}.")
+
+#define AV_RESET_TS_TEXT     N_("Reset timestamps")
+#define AV_RESET_TS_LONGTEXT N_("The muxed content will start near a 0 timestamp.")
+
+static inline void vlc_av_get_options(const char *psz_opts, AVDictionary** pp_dict)
 {
-    AVDictionary *options = NULL;
     config_chain_t *cfg = NULL;
     config_ChainParseOptions(&cfg, psz_opts);
     while (cfg) {
         config_chain_t *next = cfg->p_next;
-        av_dict_set(&options, cfg->psz_name, cfg->psz_value,
-            AV_DICT_DONT_STRDUP_KEY | AV_DICT_DONT_STRDUP_VAL);
+        av_dict_set(pp_dict, cfg->psz_name, cfg->psz_value, 0);
+        free(cfg->psz_name);
+        free(cfg->psz_value);
         free(cfg);
         cfg = next;
     }
-    return options;
 }
 
 static inline void vlc_init_avutil(vlc_object_t *obj)
@@ -73,32 +89,38 @@ static inline void vlc_init_avutil(vlc_object_t *obj)
         case VLC_MSG_WARN:
             level = AV_LOG_WARNING;
             break;
+        case VLC_MSG_INFO:
+            level = AV_LOG_INFO;
+            break;
         case VLC_MSG_DBG:
-            level = AV_LOG_DEBUG;
+            level = AV_LOG_VERBOSE;
+            break;
         default:
+            level = AV_LOG_DEBUG;
             break;
         }
     }
 
     av_log_set_level(level);
+
+    msg_Dbg(obj, "CPU flags: 0x%08x", av_get_cpu_flags());
 }
 #endif
 
-unsigned GetVlcDspMask( void );
-
 #ifdef HAVE_LIBAVFORMAT_AVFORMAT_H
 # include <libavformat/avformat.h>
+# include <libavformat/version.h>
 static inline void vlc_init_avformat(vlc_object_t *obj)
 {
     vlc_avcodec_lock();
 
     vlc_init_avutil(obj);
 
-#if LIBAVUTIL_VERSION_CHECK(51, 25, 0, 42, 100)
-    av_set_cpu_flags_mask( INT_MAX & ~GetVlcDspMask() );
-#endif
+    avformat_network_init();
 
+#if (LIBAVFORMAT_VERSION_MICRO < 100) || (LIBAVFORMAT_VERSION_INT < AV_VERSION_INT(58, 9, 100))
     av_register_all();
+#endif
 
     vlc_avcodec_unlock();
 }
@@ -106,19 +128,134 @@ static inline void vlc_init_avformat(vlc_object_t *obj)
 
 #ifdef HAVE_LIBAVCODEC_AVCODEC_H
 # include <libavcodec/avcodec.h>
+# include <libavcodec/version.h>
 static inline void vlc_init_avcodec(vlc_object_t *obj)
 {
     vlc_avcodec_lock();
 
     vlc_init_avutil(obj);
 
-#if LIBAVCODEC_VERSION_MAJOR < 54
-    avcodec_init();
-#endif
+#if (LIBAVFORMAT_VERSION_MICRO < 100) || (LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 10, 100))
     avcodec_register_all();
+#endif
 
     vlc_avcodec_unlock();
 }
 #endif
+
+#ifndef AV_ERROR_MAX_STRING_SIZE
+ #define AV_ERROR_MAX_STRING_SIZE 64
+#endif
+
+static inline vlc_rational_t FromAVRational(const AVRational rat)
+{
+    return (vlc_rational_t){.num = rat.num, .den = rat.den};
+}
+
+static inline void set_video_color_settings( const video_format_t *p_fmt, AVCodecContext *p_context )
+{
+    switch( p_fmt->color_range )
+    {
+    case COLOR_RANGE_FULL:
+        p_context->color_range = AVCOL_RANGE_JPEG;
+        break;
+    case COLOR_RANGE_LIMITED:
+        p_context->color_range = AVCOL_RANGE_MPEG;
+    case COLOR_RANGE_UNDEF: /* do nothing */
+        break;
+    default:
+        p_context->color_range = AVCOL_RANGE_UNSPECIFIED;
+        break;
+    }
+
+    switch( p_fmt->space )
+    {
+        case COLOR_SPACE_BT709:
+            p_context->colorspace = AVCOL_SPC_BT709;
+            break;
+        case COLOR_SPACE_BT601:
+            p_context->colorspace = AVCOL_SPC_BT470BG;
+            break;
+        case COLOR_SPACE_BT2020:
+            p_context->colorspace = AVCOL_SPC_BT2020_CL;
+            break;
+        default:
+            p_context->colorspace = AVCOL_SPC_UNSPECIFIED;
+            break;
+    }
+
+    switch( p_fmt->transfer )
+    {
+        case TRANSFER_FUNC_LINEAR:
+            p_context->color_trc = AVCOL_TRC_LINEAR;
+            break;
+        case TRANSFER_FUNC_SRGB:
+            p_context->color_trc = AVCOL_TRC_GAMMA22;
+            break;
+        case TRANSFER_FUNC_BT470_BG:
+            p_context->color_trc = AVCOL_TRC_GAMMA28;
+            break;
+        case TRANSFER_FUNC_BT470_M:
+            p_context->color_trc = AVCOL_TRC_GAMMA22;
+            break;
+        case TRANSFER_FUNC_BT709:
+            p_context->color_trc = AVCOL_TRC_BT709;
+            break;
+        case TRANSFER_FUNC_SMPTE_ST2084:
+            p_context->color_trc = AVCOL_TRC_SMPTEST2084;
+            break;
+        case TRANSFER_FUNC_SMPTE_240:
+            p_context->color_trc = AVCOL_TRC_SMPTE240M;
+            break;
+        default:
+            p_context->color_trc = AVCOL_TRC_UNSPECIFIED;
+            break;
+    }
+    switch( p_fmt->primaries )
+    {
+        case COLOR_PRIMARIES_BT601_525:
+            p_context->color_primaries = AVCOL_PRI_SMPTE170M;
+            break;
+        case COLOR_PRIMARIES_BT601_625:
+            p_context->color_primaries = AVCOL_PRI_BT470BG;
+            break;
+        case COLOR_PRIMARIES_BT709:
+            p_context->color_primaries = AVCOL_PRI_BT709;
+            break;
+        case COLOR_PRIMARIES_BT2020:
+            p_context->color_primaries = AVCOL_PRI_BT2020;
+            break;
+        case COLOR_PRIMARIES_FCC1953:
+            p_context->color_primaries = AVCOL_PRI_BT470M;
+            break;
+        default:
+            p_context->color_primaries = AVCOL_PRI_UNSPECIFIED;
+            break;
+    }
+    switch( p_fmt->chroma_location )
+    {
+        case CHROMA_LOCATION_LEFT:
+            p_context->chroma_sample_location = AVCHROMA_LOC_LEFT;
+            break;
+        case CHROMA_LOCATION_CENTER:
+            p_context->chroma_sample_location = AVCHROMA_LOC_CENTER;
+            break;
+        case CHROMA_LOCATION_TOP_LEFT:
+            p_context->chroma_sample_location = AVCHROMA_LOC_TOPLEFT;
+            break;
+        case CHROMA_LOCATION_TOP_CENTER:
+            p_context->chroma_sample_location = AVCHROMA_LOC_TOP;
+            break;
+        case CHROMA_LOCATION_BOTTOM_LEFT:
+            p_context->chroma_sample_location = AVCHROMA_LOC_BOTTOMLEFT;
+            break;
+        case CHROMA_LOCATION_BOTTOM_CENTER:
+            p_context->chroma_sample_location = AVCHROMA_LOC_BOTTOM;
+            break;
+        default:
+            p_context->chroma_sample_location = AVCHROMA_LOC_UNSPECIFIED;
+            break;
+    }
+}
 
 #endif

@@ -1,8 +1,7 @@
 /*****************************************************************************
  * libvlc_media_player.h:  libvlc_media_player external API
  *****************************************************************************
- * Copyright (C) 1998-2010 VLC authors and VideoLAN
- * $Id$
+ * Copyright (C) 1998-2015 VLC authors and VideoLAN
  *
  * Authors: Clément Stenac <zorglub@videolan.org>
  *          Jean-Paul Saman <jpsaman@videolan.org>
@@ -23,11 +22,6 @@
  * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
  *****************************************************************************/
 
-/**
- * \file
- * This file defines libvlc_media_player external API
- */
-
 #ifndef VLC_LIBVLC_MEDIA_PLAYER_H
 #define VLC_LIBVLC_MEDIA_PLAYER_H 1
 
@@ -37,13 +31,12 @@ extern "C" {
 #  include <stdbool.h>
 # endif
 
-/*****************************************************************************
- * Media Player
- *****************************************************************************/
 /** \defgroup libvlc_media_player LibVLC media player
  * \ingroup libvlc
  * A LibVLC media player plays one media (usually in a custom drawable).
  * @{
+ * \file
+ * LibVLC simple media player external API
  */
 
 typedef struct libvlc_media_player_t libvlc_media_player_t;
@@ -59,6 +52,32 @@ typedef struct libvlc_track_description_t
     struct libvlc_track_description_t *p_next;
 
 } libvlc_track_description_t;
+
+/**
+ * Description for titles
+ */
+enum
+{
+    libvlc_title_menu          = 0x01,
+    libvlc_title_interactive   = 0x02
+};
+
+typedef struct libvlc_title_description_t
+{
+    int64_t i_duration; /**< duration in milliseconds */
+    char *psz_name; /**< title name */
+    unsigned i_flags; /**< info if item was recognized as a menu, interactive or plain content by the demuxer */
+} libvlc_title_description_t;
+
+/**
+ * Description for chapters
+ */
+typedef struct libvlc_chapter_description_t
+{
+    int64_t i_time_offset; /**< time-offset of the chapter in milliseconds */
+    int64_t i_duration; /**< duration of the chapter in milliseconds */
+    char *psz_name; /**< chapter name */
+} libvlc_chapter_description_t;
 
 /**
  * Description for audio output. It contains
@@ -82,15 +101,6 @@ typedef struct libvlc_audio_output_device_t
     char *psz_description; /**< User-friendly device description */
     /* More fields may be added here in later versions */
 } libvlc_audio_output_device_t;
-
-/**
- * Rectangle type for video geometry
- */
-typedef struct libvlc_rectangle_t
-{
-    int top, left;
-    int bottom, right;
-} libvlc_rectangle_t;
 
 /**
  * Marq options definition
@@ -117,7 +127,8 @@ typedef enum libvlc_navigate_mode_t
     libvlc_navigate_up,
     libvlc_navigate_down,
     libvlc_navigate_left,
-    libvlc_navigate_right
+    libvlc_navigate_right,
+    libvlc_navigate_popup
 } libvlc_navigate_mode_t;
 
 /**
@@ -137,6 +148,18 @@ typedef enum libvlc_position_t {
 } libvlc_position_t;
 
 /**
+ * Enumeration of teletext keys than can be passed via
+ * libvlc_video_set_teletext()
+ */
+typedef enum libvlc_teletext_key_t {
+    libvlc_teletext_key_red = 'r' << 16,
+    libvlc_teletext_key_green = 'g' << 16,
+    libvlc_teletext_key_yellow = 'y' << 16,
+    libvlc_teletext_key_blue = 'b' << 16,
+    libvlc_teletext_key_index = 'i' << 16,
+} libvlc_teletext_key_t;
+
+/**
  * Opaque equalizer handle.
  *
  * Equalizer settings can be applied to a media player.
@@ -149,6 +172,7 @@ typedef struct libvlc_equalizer_t libvlc_equalizer_t;
  * \param p_libvlc_instance the libvlc instance in which the Media Player
  *        should be created.
  * \return a new media player object, or NULL on error.
+ * It must be released by libvlc_media_player_release().
  */
 LIBVLC_API libvlc_media_player_t * libvlc_media_player_new( libvlc_instance_t *p_libvlc_instance );
 
@@ -158,6 +182,7 @@ LIBVLC_API libvlc_media_player_t * libvlc_media_player_new( libvlc_instance_t *p
  * \param p_md the media. Afterwards the p_md can be safely
  *        destroyed.
  * \return a new media player object, or NULL on error.
+ * It must be released by libvlc_media_player_release().
  */
 LIBVLC_API libvlc_media_player_t * libvlc_media_player_new_from_media( libvlc_media_t *p_md );
 
@@ -212,11 +237,10 @@ LIBVLC_API libvlc_event_manager_t * libvlc_media_player_event_manager ( libvlc_m
  * is_playing
  *
  * \param p_mi the Media Player
- * \return 1 if the media player is playing, 0 otherwise
- *
- * \libvlc_return_bool
+ * \retval true media player is playing
+ * \retval false media player is not playing
  */
-LIBVLC_API int libvlc_media_player_is_playing ( libvlc_media_player_t *p_mi );
+LIBVLC_API bool libvlc_media_player_is_playing(libvlc_media_player_t *p_mi);
 
 /**
  * Play
@@ -244,11 +268,69 @@ LIBVLC_API void libvlc_media_player_set_pause ( libvlc_media_player_t *mp,
 LIBVLC_API void libvlc_media_player_pause ( libvlc_media_player_t *p_mi );
 
 /**
- * Stop (no effect if there is no media)
+ * Stop asynchronously
+ *
+ * \note This function is asynchronous. In case of success, the user should
+ * wait for the libvlc_MediaPlayerStopped event to know when the stop is
+ * finished.
  *
  * \param p_mi the Media Player
+ * \return 0 if the player is being stopped, -1 otherwise (no-op)
+ * \version LibVLC 4.0.0 or later
  */
-LIBVLC_API void libvlc_media_player_stop ( libvlc_media_player_t *p_mi );
+LIBVLC_API int libvlc_media_player_stop_async ( libvlc_media_player_t *p_mi );
+
+/**
+ * Set a renderer to the media player
+ *
+ * \note must be called before the first call of libvlc_media_player_play() to
+ * take effect.
+ *
+ * \see libvlc_renderer_discoverer_new
+ *
+ * \param p_mi the Media Player
+ * \param p_item an item discovered by libvlc_renderer_discoverer_start()
+ * \return 0 on success, -1 on error.
+ * \version LibVLC 3.0.0 or later
+ */
+LIBVLC_API int libvlc_media_player_set_renderer( libvlc_media_player_t *p_mi,
+                                                 libvlc_renderer_item_t *p_item );
+
+/**
+ * Enumeration of the Video color primaries.
+ */
+typedef enum libvlc_video_color_primaries_t {
+    libvlc_video_primaries_BT601_525 = 1,
+    libvlc_video_primaries_BT601_625 = 2,
+    libvlc_video_primaries_BT709     = 3,
+    libvlc_video_primaries_BT2020    = 4,
+    libvlc_video_primaries_DCI_P3    = 5,
+    libvlc_video_primaries_BT470_M   = 6,
+} libvlc_video_color_primaries_t;
+
+/**
+ * Enumeration of the Video color spaces.
+ */
+typedef enum libvlc_video_color_space_t {
+    libvlc_video_colorspace_BT601  = 1,
+    libvlc_video_colorspace_BT709  = 2,
+    libvlc_video_colorspace_BT2020 = 3,
+} libvlc_video_color_space_t;
+
+/**
+ * Enumeration of the Video transfer functions.
+ */
+typedef enum libvlc_video_transfer_func_t {
+    libvlc_video_transfer_func_LINEAR     = 1,
+    libvlc_video_transfer_func_SRGB       = 2,
+    libvlc_video_transfer_func_BT470_BG   = 3,
+    libvlc_video_transfer_func_BT470_M    = 4,
+    libvlc_video_transfer_func_BT709      = 5,
+    libvlc_video_transfer_func_PQ         = 6,
+    libvlc_video_transfer_func_SMPTE_240  = 7,
+    libvlc_video_transfer_func_HLG        = 8,
+} libvlc_video_transfer_func_t;
+
 
 /**
  * Callback prototype to allocate and lock a picture buffer.
@@ -273,7 +355,7 @@ typedef void *(*libvlc_video_lock_cb)(void *opaque, void **planes);
  * This callback might not be needed at all. It is only an indication that the
  * application can now read the pixel values if it needs to.
  *
- * \warning A picture buffer is unlocked after the picture is decoded,
+ * \note A picture buffer is unlocked after the picture is decoded,
  * but before the picture is displayed.
  *
  * \param opaque private pointer as passed to libvlc_video_set_callbacks() [IN]
@@ -307,12 +389,16 @@ typedef void (*libvlc_video_display_cb)(void *opaque, void *picture);
  * \param opaque pointer to the private pointer passed to
  *               libvlc_video_set_callbacks() [IN/OUT]
  * \param chroma pointer to the 4 bytes video format identifier [IN/OUT]
- * \param width pointer to the pixel width [IN/OUT]
- * \param height pointer to the pixel height [IN/OUT]
+ * \param width pointer to the buffer width in pixels[IN/OUT]
+ * \param height pointer to the buffer height in pixels[IN/OUT]
  * \param pitches table of scanline pitches in bytes for each pixel plane
  *                (the table is allocated by LibVLC) [OUT]
  * \param lines table of scanlines count for each plane [OUT]
  * \return the number of picture buffers allocated, 0 indicates failure
+ *
+ * \version LibVLC 4.0.0 and later.
+ * \param (width+1) - pointer to display width in pixels[IN]
+ * \param (height+1) - pointer to display height in pixels[IN]
  *
  * \note
  * For each pixels plane, the scanline pitch must be bigger than or equal to
@@ -320,7 +406,7 @@ typedef void (*libvlc_video_display_cb)(void *opaque, void *picture);
  * Similarly, the number of scanlines must be bigger than of equal to
  * the pixel height.
  * Furthermore, we recommend that pitches and lines be multiple of 32
- * to not break assumption that might be made by various optimizations
+ * to not break assumptions that might be held by optimized code
  * in the video decoders, video filters and/or video converters.
  */
 typedef unsigned (*libvlc_video_format_cb)(void **opaque, char *chroma,
@@ -331,7 +417,7 @@ typedef unsigned (*libvlc_video_format_cb)(void **opaque, char *chroma,
 /**
  * Callback prototype to configure picture buffers format.
  *
- * \param opaque private pointer as passed to libvlc_video_set_callbacks()
+ * \param opaque private pointer as passed to libvlc_video_set_format_callbacks()
  *               (and possibly modified by @ref libvlc_video_format_cb) [IN]
  */
 typedef void (*libvlc_video_cleanup_cb)(void *opaque);
@@ -342,6 +428,30 @@ typedef void (*libvlc_video_cleanup_cb)(void *opaque);
  * in memory.
  * Use libvlc_video_set_format() or libvlc_video_set_format_callbacks()
  * to configure the decoded format.
+ *
+ * \warning Rendering video into custom memory buffers is considerably less
+ * efficient than rendering in a custom window as normal.
+ *
+ * For optimal perfomances, VLC media player renders into a custom window, and
+ * does not use this function and associated callbacks. It is <b>highly
+ * recommended</b> that other LibVLC-based application do likewise.
+ * To embed video in a window, use libvlc_media_player_set_xid() or equivalent
+ * depending on the operating system.
+ *
+ * If window embedding does not fit the application use case, then a custom
+ * LibVLC video output display plugin is required to maintain optimal video
+ * rendering performances.
+ *
+ * The following limitations affect performance:
+ * - Hardware video decoding acceleration will either be disabled completely,
+ *   or require (relatively slow) copy from video/DSP memory to main memory.
+ * - Sub-pictures (subtitles, on-screen display, etc.) must be blent into the
+ *   main picture by the CPU instead of the GPU.
+ * - Depending on the video format, pixel format conversion, picture scaling,
+ *   cropping and/or picture re-orientation, must be performed by the CPU
+ *   instead of the GPU.
+ * - Memory copying is required between LibVLC reference picture buffers and
+ *   application buffers (between lock and unlock callbacks).
  *
  * \param mp the media player
  * \param lock callback to lock video memory (must not be NULL)
@@ -392,26 +502,287 @@ void libvlc_video_set_format_callbacks( libvlc_media_player_t *mp,
                                         libvlc_video_format_cb setup,
                                         libvlc_video_cleanup_cb cleanup );
 
+
+typedef struct
+{
+    bool hardware_decoding; /** set if D3D11_CREATE_DEVICE_VIDEO_SUPPORT is needed for D3D11 */
+} libvlc_video_setup_device_cfg_t;
+
+typedef struct
+{
+    union {
+        struct {
+            void *device_context; /** ID3D11DeviceContext* */
+        } d3d11;
+        struct {
+            void *device;         /** IDirect3D9* */
+            int  adapter;         /** Adapter to use with the IDirect3D9* */
+        } d3d9;
+    };
+} libvlc_video_setup_device_info_t;
+
+/**
+ * Callback prototype called to initialize user data.
+ * Setup the rendering environment.
+ *
+ * \param opaque private pointer passed to the @a libvlc_video_set_output_callbacks()
+ *               on input. The callback can change this value on output to be
+ *               passed to all the other callbacks set on @a libvlc_video_set_output_callbacks().
+ *               [IN/OUT]
+ * \param cfg requested configuration of the video device [IN]
+ * \param out libvlc_video_setup_device_info_t* to fill [OUT]
+ * \return true on success
+ * \version LibVLC 4.0.0 or later
+ *
+ * For \ref libvlc_video_engine_d3d9 the output must be a IDirect3D9*.
+ * A reference to this object is held until the \ref LIBVLC_VIDEO_DEVICE_CLEANUP is called.
+ * the device must be created with D3DPRESENT_PARAMETERS.hDeviceWindow set to 0.
+ *
+ * For \ref libvlc_video_engine_d3d11 the output must be a ID3D11DeviceContext*.
+ * A reference to this object is held until the \ref LIBVLC_VIDEO_DEVICE_CLEANUP is called.
+ * The ID3D11Device used to create ID3D11DeviceContext must have multithreading enabled.
+ */
+typedef bool (*libvlc_video_output_setup_cb)(void **opaque,
+                                      const libvlc_video_setup_device_cfg_t *cfg,
+                                      libvlc_video_setup_device_info_t *out);
+
+
+/**
+ * Callback prototype called to release user data
+ *
+ * \param opaque private pointer set on the opaque parameter of @a libvlc_video_output_setup_cb() [IN]
+ * \version LibVLC 4.0.0 or later
+ */
+typedef void (*libvlc_video_output_cleanup_cb)(void* opaque);
+
+typedef struct
+{
+    unsigned width;                        /** rendering video width in pixel */
+    unsigned height;                      /** rendering video height in pixel */
+    unsigned bitdepth;      /** rendering video bit depth in bits per channel */
+    bool full_range;          /** video is full range or studio/limited range */
+    libvlc_video_color_space_t colorspace;              /** video color space */
+    libvlc_video_color_primaries_t primaries;       /** video color primaries */
+    libvlc_video_transfer_func_t transfer;        /** video transfer function */
+    void *device;   /** device used for rendering, IDirect3DDevice9* for D3D9 */
+} libvlc_video_render_cfg_t;
+
+typedef struct
+{
+    union {
+        int dxgi_format;  /** the rendering DXGI_FORMAT for \ref libvlc_video_engine_d3d11*/
+        uint32_t d3d9_format;  /** the rendering D3DFORMAT for \ref libvlc_video_engine_d3d9 */
+        int opengl_format;  /** the rendering GLint GL_RGBA or GL_RGB for \ref libvlc_video_engine_opengl and
+                            for \ref libvlc_video_engine_gles2 */
+        void *p_surface; /** currently unused */
+    };
+    bool full_range;          /** video is full range or studio/limited range */
+    libvlc_video_color_space_t colorspace;              /** video color space */
+    libvlc_video_color_primaries_t primaries;       /** video color primaries */
+    libvlc_video_transfer_func_t transfer;        /** video transfer function */
+} libvlc_video_output_cfg_t;
+
+/**
+ * Callback prototype called on video size changes.
+ * Update the rendering output setup.
+ *
+ * \param opaque private pointer set on the opaque parameter of @a libvlc_video_output_setup_cb() [IN]
+ * \param cfg configuration of the video that will be rendered [IN]
+ * \param output configuration describing with how the rendering is setup [OUT]
+ * \version LibVLC 4.0.0 or later
+ *
+ * \note the configuration device for Direct3D9 is the IDirect3DDevice9 that VLC
+ *       uses to render. The host must set a Render target and call Present()
+ *       when it needs the drawing from VLC to be done. This object is not valid
+ *       anymore after Cleanup is called.
+ *
+ * Tone mapping, range and color conversion will be done depending on the values
+ * set in the output structure.
+ */
+typedef bool (*libvlc_video_update_output_cb)(void* opaque, const libvlc_video_render_cfg_t *cfg,
+                                              libvlc_video_output_cfg_t *output );
+
+
+/**
+ * Callback prototype called after performing drawing calls.
+ *
+ * \param opaque private pointer set on the opaque parameter of @a libvlc_video_output_setup_cb() [IN]
+ * \version LibVLC 4.0.0 or later
+ */
+typedef void (*libvlc_video_swap_cb)(void* opaque);
+
+/**
+ * Callback prototype to set up the OpenGL context for rendering.
+ * Tell the host the rendering is about to start/has finished.
+ *
+ * \param opaque private pointer set on the opaque parameter of @a libvlc_video_output_setup_cb() [IN]
+ * \param enter true to set the context as current, false to unset it [IN]
+ * \return true on success
+ * \version LibVLC 4.0.0 or later
+ *
+ * On Direct3D11 the following may change on the provided ID3D11DeviceContext*
+ * between \ref enter being true and \ref enter being false:
+ * - IASetPrimitiveTopology()
+ * - IASetInputLayout()
+ * - IASetVertexBuffers()
+ * - IASetIndexBuffer()
+ * - VSSetConstantBuffers()
+ * - VSSetShader()
+ * - PSSetSamplers()
+ * - PSSetConstantBuffers()
+ * - PSSetShaderResources()
+ * - PSSetShader()
+ * - RSSetViewports()
+ * - DrawIndexed()
+ */
+typedef bool (*libvlc_video_makeCurrent_cb)(void* opaque, bool enter);
+
+/**
+ * Callback prototype to load opengl functions
+ *
+ * \param opaque private pointer set on the opaque parameter of @a libvlc_video_output_setup_cb() [IN]
+ * \param fct_name name of the opengl function to load
+ * \return a pointer to the named OpenGL function the NULL otherwise
+ * \version LibVLC 4.0.0 or later
+ */
+typedef void* (*libvlc_video_getProcAddress_cb)(void* opaque, const char* fct_name);
+
+typedef struct
+{
+    /* similar to SMPTE ST 2086 mastering display color volume */
+    uint16_t RedPrimary[2];
+    uint16_t GreenPrimary[2];
+    uint16_t BluePrimary[2];
+    uint16_t WhitePoint[2];
+    unsigned int MaxMasteringLuminance;
+    unsigned int MinMasteringLuminance;
+    uint16_t MaxContentLightLevel;
+    uint16_t MaxFrameAverageLightLevel;
+} libvlc_video_frame_hdr10_metadata_t;
+
+typedef enum libvlc_video_metadata_type_t {
+    libvlc_video_metadata_frame_hdr10, /**< libvlc_video_frame_hdr10_metadata_t */
+} libvlc_video_metadata_type_t;
+
+/**
+ * Callback prototype to receive metadata before rendering.
+ *
+ * \param opaque private pointer passed to the @a libvlc_video_set_output_callbacks() [IN]
+ * \param type type of data passed in metadata [IN]
+ * \param metadata the type of metadata [IN]
+ * \version LibVLC 4.0.0 or later
+ */
+typedef void (*libvlc_video_frameMetadata_cb)(void* opaque, libvlc_video_metadata_type_t type, const void *metadata);
+
+/**
+ * Enumeration of the Video engine to be used on output.
+ * can be passed to @a libvlc_video_set_output_callbacks
+ */
+typedef enum libvlc_video_engine_t {
+    /** Disable rendering engine */
+    libvlc_video_engine_disable,
+    libvlc_video_engine_opengl,
+    libvlc_video_engine_gles2,
+    /** Direct3D11 rendering engine */
+    libvlc_video_engine_d3d11,
+    /** Direct3D9 rendering engine */
+    libvlc_video_engine_d3d9,
+} libvlc_video_engine_t;
+
+/** Set the callback to call when the host app resizes the rendering area.
+ *
+ * This allows text rendering and aspect ratio to be handled properly when the host
+ * rendering size changes.
+ *
+ * It may be called before the \ref libvlc_video_output_setup_cb callback.
+ *
+ * \param opaque private pointer set on the opaque parameter of @a libvlc_video_output_setup_cb() [IN]
+ * \param report_size_change callback which must be called when the host size changes. [IN]
+ *        The callback is valid until another call to \ref libvlc_video_output_set_resize_cb
+ *        is done. This may be called from any thread.
+ * \param report_opaque private pointer to pass to the \ref report_size_change callback. [IN]
+ */
+typedef void( *libvlc_video_output_set_resize_cb )( void *opaque,
+                                                    void (*report_size_change)(void *report_opaque, unsigned width, unsigned height),
+                                                    void *report_opaque );
+
+/** Tell the host the rendering for the given plane is about to start
+ *
+ * \param opaque private pointer set on the opaque parameter of @a libvlc_video_output_setup_cb() [IN]
+ * \param plane number of the rendering plane to select
+ * \return true on success
+ * \version LibVLC 4.0.0 or later
+ *
+ * \note This is only used with \ref libvlc_video_engine_d3d11.
+ *
+ * The host should call OMSetRenderTargets for Direct3D11. If this callback is
+ * not used (set to NULL in @a libvlc_video_set_output_callbacks()) OMSetRenderTargets
+ * has to be set during the @a libvlc_video_makeCurrent_cb()
+ * entering call.
+ *
+ * The number of planes depend on the DXGI_FORMAT returned during the
+ * \ref LIBVLC_VIDEO_UPDATE_OUTPUT call. It's usually one plane except for
+ * semi-planar formats like DXGI_FORMAT_NV12 or DXGI_FORMAT_P010.
+ */
+typedef bool( *libvlc_video_output_select_plane_cb )( void *opaque, size_t plane );
+
+/**
+ * Set callbacks and data to render decoded video to a custom texture
+ *
+ * \warning VLC will perform video rendering in its own thread and at its own rate,
+ * You need to provide your own synchronisation mechanism.
+ *
+ * \param mp the media player
+ * \param engine the GPU engine to use
+ * \param setup_cb callback called to initialize user data
+ * \param cleanup_cb callback called to clean up user data
+ * \param resize_cb callback to set the resize callback
+ * \param update_output_cb callback to get the rendering format of the host (cannot be NULL)
+ * \param swap_cb callback called after rendering a video frame (cannot be NULL)
+ * \param makeCurrent_cb callback called to enter/leave the rendering context (cannot be NULL)
+ * \param getProcAddress_cb opengl function loading callback (cannot be NULL for \ref libvlc_video_engine_opengl and for \ref libvlc_video_engine_gles2)
+ * \param metadata_cb callback to provide frame metadata (D3D11 only)
+ * \param select_plane_cb callback to select different D3D11 rendering targets
+ * \param opaque private pointer passed to callbacks
+ *
+ * \retval true engine selected and callbacks set
+ * \retval false engine type unknown, callbacks not set
+ * \version LibVLC 4.0.0 or later
+ */
+LIBVLC_API
+bool libvlc_video_set_output_callbacks( libvlc_media_player_t *mp,
+                                        libvlc_video_engine_t engine,
+                                        libvlc_video_output_setup_cb setup_cb,
+                                        libvlc_video_output_cleanup_cb cleanup_cb,
+                                        libvlc_video_output_set_resize_cb resize_cb,
+                                        libvlc_video_update_output_cb update_output_cb,
+                                        libvlc_video_swap_cb swap_cb,
+                                        libvlc_video_makeCurrent_cb makeCurrent_cb,
+                                        libvlc_video_getProcAddress_cb getProcAddress_cb,
+                                        libvlc_video_frameMetadata_cb metadata_cb,
+                                        libvlc_video_output_select_plane_cb select_plane_cb,
+                                        void* opaque );
+
 /**
  * Set the NSView handler where the media player should render its video output.
  *
  * Use the vout called "macosx".
  *
- * The drawable is an NSObject that follow the VLCOpenGLVideoViewEmbedding
+ * The drawable is an NSObject that follow the VLCVideoViewEmbedding
  * protocol:
  *
- * @begincode
- * \@protocol VLCOpenGLVideoViewEmbedding <NSObject>
+ * @code{.m}
+ * @protocol VLCVideoViewEmbedding <NSObject>
  * - (void)addVoutSubview:(NSView *)view;
  * - (void)removeVoutSubview:(NSView *)view;
- * \@end
+ * @end
  * @endcode
  *
  * Or it can be an NSView object.
  *
- * If you want to use it along with Qt4 see the QMacCocoaViewContainer. Then
+ * If you want to use it along with Qt see the QMacCocoaViewContainer. Then
  * the following code should work:
- * @begincode
+ * @code{.mm}
  * {
  *     NSView *video = [[NSView alloc] init];
  *     QMacCocoaViewContainer *container = new QMacCocoaViewContainer(video, parent);
@@ -424,7 +795,7 @@ void libvlc_video_set_format_callbacks( libvlc_media_player_t *mp,
  *
  * \param p_mi the Media Player
  * \param drawable the drawable that is either an NSView or an object following
- * the VLCOpenGLVideoViewEmbedding protocol.
+ * the VLCVideoViewEmbedding protocol.
  */
 LIBVLC_API void libvlc_media_player_set_nsobject ( libvlc_media_player_t *p_mi, void * drawable );
 
@@ -437,36 +808,47 @@ LIBVLC_API void libvlc_media_player_set_nsobject ( libvlc_media_player_t *p_mi, 
 LIBVLC_API void * libvlc_media_player_get_nsobject ( libvlc_media_player_t *p_mi );
 
 /**
- * Set the agl handler where the media player should render its video output.
- *
- * \param p_mi the Media Player
- * \param drawable the agl handler
- */
-LIBVLC_API void libvlc_media_player_set_agl ( libvlc_media_player_t *p_mi, uint32_t drawable );
-
-/**
- * Get the agl handler previously set with libvlc_media_player_set_agl().
- *
- * \param p_mi the Media Player
- * \return the agl handler or 0 if none where set
- */
-LIBVLC_API uint32_t libvlc_media_player_get_agl ( libvlc_media_player_t *p_mi );
-
-/**
  * Set an X Window System drawable where the media player should render its
- * video output. If LibVLC was built without X11 output support, then this has
- * no effects.
+ * video output. The call takes effect when the playback starts. If it is
+ * already started, it might need to be stopped before changes apply.
+ * If LibVLC was built without X11 output support, then this function has no
+ * effects.
  *
+ * By default, LibVLC will capture input events on the video rendering area.
+ * Use libvlc_video_set_mouse_input() and libvlc_video_set_key_input() to
+ * disable that and deliver events to the parent window / to the application
+ * instead. By design, the X11 protocol delivers input events to only one
+ * recipient.
+ *
+ * \warning
+ * The application must call the XInitThreads() function from Xlib before
+ * libvlc_new(), and before any call to XOpenDisplay() directly or via any
+ * other library. Failure to call XInitThreads() will seriously impede LibVLC
+ * performance. Calling XOpenDisplay() before XInitThreads() will eventually
+ * crash the process. That is a limitation of Xlib.
+ *
+ * \param p_mi media player
+ * \param drawable X11 window ID
+ *
+ * \note
  * The specified identifier must correspond to an existing Input/Output class
- * X11 window. Pixmaps are <b>not</b> supported. The caller shall ensure that
- * the X11 server is the same as the one the VLC instance has been configured
- * with. This function must be called before video playback is started;
- * otherwise it will only take effect after playback stop and restart.
+ * X11 window. Pixmaps are <b>not</b> currently supported. The default X11
+ * server is assumed, i.e. that specified in the DISPLAY environment variable.
  *
- * \param p_mi the Media Player
- * \param drawable the ID of the X window
+ * \warning
+ * LibVLC can deal with invalid X11 handle errors, however some display drivers
+ * (EGL, GLX, VA and/or VDPAU) can unfortunately not. Thus the window handle
+ * must remain valid until playback is stopped, otherwise the process may
+ * abort or crash.
+ *
+ * \bug
+ * No more than one window handle per media player instance can be specified.
+ * If the media has multiple simultaneously active video tracks, extra tracks
+ * will be rendered into external windows beyond the control of the
+ * application.
  */
-LIBVLC_API void libvlc_media_player_set_xwindow ( libvlc_media_player_t *p_mi, uint32_t drawable );
+LIBVLC_API void libvlc_media_player_set_xwindow(libvlc_media_player_t *p_mi,
+                                                uint32_t drawable);
 
 /**
  * Get the X Window System window identifier previously set with
@@ -500,9 +882,37 @@ LIBVLC_API void libvlc_media_player_set_hwnd ( libvlc_media_player_t *p_mi, void
 LIBVLC_API void *libvlc_media_player_get_hwnd ( libvlc_media_player_t *p_mi );
 
 /**
+ * Set the android context.
+ *
+ * \version LibVLC 3.0.0 and later.
+ *
+ * \param p_mi the media player
+ * \param p_awindow_handler org.videolan.libvlc.AWindow jobject owned by the
+ *        org.videolan.libvlc.MediaPlayer class from the libvlc-android project.
+ */
+LIBVLC_API void libvlc_media_player_set_android_context( libvlc_media_player_t *p_mi,
+                                                         void *p_awindow_handler );
+
+/**
  * Callback prototype for audio playback.
+ *
+ * The LibVLC media player decodes and post-processes the audio signal
+ * asynchronously (in an internal thread). Whenever audio samples are ready
+ * to be queued to the output, this callback is invoked.
+ *
+ * The number of samples provided per invocation may depend on the file format,
+ * the audio coding algorithm, the decoder plug-in, the post-processing
+ * filters and timing. Application must not assume a certain number of samples.
+ *
+ * The exact format of audio samples is determined by libvlc_audio_set_format()
+ * or libvlc_audio_set_format_callbacks() as is the channels layout.
+ *
+ * Note that the number of samples is per channel. For instance, if the audio
+ * track sampling rate is 48000 Hz, then 1200 samples represent 25 milliseconds
+ * of audio signal - regardless of the number of audio channels.
+ *
  * \param data data pointer as passed to libvlc_audio_set_callbacks() [IN]
- * \param samples pointer to the first audio sample to play back [IN]
+ * \param samples pointer to a table of audio samples to play back [IN]
  * \param count number of audio samples to play back
  * \param pts expected play time stamp (see libvlc_delay())
  */
@@ -511,6 +921,9 @@ typedef void (*libvlc_audio_play_cb)(void *data, const void *samples,
 
 /**
  * Callback prototype for audio pause.
+ *
+ * LibVLC invokes this callback to pause audio playback.
+ *
  * \note The pause callback is never called if the audio is already paused.
  * \param data data pointer as passed to libvlc_audio_set_callbacks() [IN]
  * \param pts time stamp of the pause request (should be elapsed already)
@@ -518,7 +931,11 @@ typedef void (*libvlc_audio_play_cb)(void *data, const void *samples,
 typedef void (*libvlc_audio_pause_cb)(void *data, int64_t pts);
 
 /**
- * Callback prototype for audio resumption (i.e. restart from pause).
+ * Callback prototype for audio resumption.
+ *
+ * LibVLC invokes this callback to resume audio playback after it was
+ * previously paused.
+ *
  * \note The resume callback is never called if the audio is not paused.
  * \param data data pointer as passed to libvlc_audio_set_callbacks() [IN]
  * \param pts time stamp of the resumption request (should be elapsed already)
@@ -526,15 +943,23 @@ typedef void (*libvlc_audio_pause_cb)(void *data, int64_t pts);
 typedef void (*libvlc_audio_resume_cb)(void *data, int64_t pts);
 
 /**
- * Callback prototype for audio buffer flush
- * (i.e. discard all pending buffers and stop playback as soon as possible).
+ * Callback prototype for audio buffer flush.
+ *
+ * LibVLC invokes this callback if it needs to discard all pending buffers and
+ * stop playback as soon as possible. This typically occurs when the media is
+ * stopped.
+ *
  * \param data data pointer as passed to libvlc_audio_set_callbacks() [IN]
  */
 typedef void (*libvlc_audio_flush_cb)(void *data, int64_t pts);
 
 /**
- * Callback prototype for audio buffer drain
- * (i.e. wait for pending buffers to be played).
+ * Callback prototype for audio buffer drain.
+ *
+ * LibVLC may invoke this callback when the decoded audio track is ending.
+ * There will be no further decoded samples for the track, but playback should
+ * nevertheless continue until all already pending buffers are rendered.
+ *
  * \param data data pointer as passed to libvlc_audio_set_callbacks() [IN]
  */
 typedef void (*libvlc_audio_drain_cb)(void *data);
@@ -549,9 +974,13 @@ typedef void (*libvlc_audio_set_volume_cb)(void *data,
                                            float volume, bool mute);
 
 /**
- * Set callbacks and private data for decoded audio.
+ * Sets callbacks and private data for decoded audio.
+ *
  * Use libvlc_audio_set_format() or libvlc_audio_set_format_callbacks()
  * to configure the decoded audio format.
+ *
+ * \note The audio callbacks override any other audio output mechanism.
+ * If the callbacks are set, LibVLC will <b>not</b> output audio in any way.
  *
  * \param mp the media player
  * \param play callback to play audio samples (must not be NULL)
@@ -572,7 +1001,8 @@ void libvlc_audio_set_callbacks( libvlc_media_player_t *mp,
                                  void *opaque );
 
 /**
- * Set callbacks and private data for decoded audio.
+ * Set callbacks and private data for decoded audio. This only works in
+ * combination with libvlc_audio_set_callbacks().
  * Use libvlc_audio_set_format() or libvlc_audio_set_format_callbacks()
  * to configure the decoded audio format.
  *
@@ -587,6 +1017,7 @@ void libvlc_audio_set_volume_callback( libvlc_media_player_t *mp,
 
 /**
  * Callback prototype to setup the audio playback.
+ *
  * This is called when the media player needs to create a new audio output.
  * \param opaque pointer to the data pointer passed to
  *               libvlc_audio_set_callbacks() [IN/OUT]
@@ -595,19 +1026,21 @@ void libvlc_audio_set_volume_callback( libvlc_media_player_t *mp,
  * \param channels channels count [IN/OUT]
  * \return 0 on success, anything else to skip audio playback
  */
-typedef int (*libvlc_audio_setup_cb)(void **data, char *format, unsigned *rate,
+typedef int (*libvlc_audio_setup_cb)(void **opaque, char *format, unsigned *rate,
                                      unsigned *channels);
 
 /**
  * Callback prototype for audio playback cleanup.
+ *
  * This is called when the media player no longer needs an audio output.
  * \param opaque data pointer as passed to libvlc_audio_set_callbacks() [IN]
  */
 typedef void (*libvlc_audio_cleanup_cb)(void *data);
 
 /**
- * Set decoded audio format. This only works in combination with
- * libvlc_audio_set_callbacks().
+ * Sets decoded audio format via callbacks.
+ *
+ * This only works in combination with libvlc_audio_set_callbacks().
  *
  * \param mp the media player
  * \param setup callback to select the audio format (cannot be NULL)
@@ -620,13 +1053,14 @@ void libvlc_audio_set_format_callbacks( libvlc_media_player_t *mp,
                                         libvlc_audio_cleanup_cb cleanup );
 
 /**
- * Set decoded audio format.
+ * Sets a fixed decoded audio format.
+ *
  * This only works in combination with libvlc_audio_set_callbacks(),
  * and is mutually exclusive with libvlc_audio_set_format_callbacks().
  *
  * \param mp the media player
  * \param format a four-characters string identifying the sample format
- *               (e.g. "S16N" or "FL32")
+ *               (e.g. "S16N" or "f32l")
  * \param rate sample rate (expressed in Hz)
  * \param channels channels count
  * \version LibVLC 2.0.0 or later
@@ -658,9 +1092,12 @@ LIBVLC_API libvlc_time_t libvlc_media_player_get_time( libvlc_media_player_t *p_
  * Not all formats and protocols support this.
  *
  * \param p_mi the Media Player
+ * \param b_fast prefer fast seeking or precise seeking
  * \param i_time the movie time (in ms).
+ * \return 0 on success, -1 on error
  */
-LIBVLC_API void libvlc_media_player_set_time( libvlc_media_player_t *p_mi, libvlc_time_t i_time );
+LIBVLC_API int libvlc_media_player_set_time( libvlc_media_player_t *p_mi,
+                                             libvlc_time_t i_time, bool b_fast );
 
 /**
  * Get movie position as percentage between 0.0 and 1.0.
@@ -671,14 +1108,17 @@ LIBVLC_API void libvlc_media_player_set_time( libvlc_media_player_t *p_mi, libvl
 LIBVLC_API float libvlc_media_player_get_position( libvlc_media_player_t *p_mi );
 
 /**
- * Set movie position as percentage between 0.0 and 1.0. 
+ * Set movie position as percentage between 0.0 and 1.0.
  * This has no effect if playback is not enabled.
  * This might not work depending on the underlying input format and protocol.
  *
  * \param p_mi the Media Player
+ * \param b_fast prefer fast seeking or precise seeking
  * \param f_pos the position
+ * \return 0 on success, -1 on error
  */
-LIBVLC_API void libvlc_media_player_set_position( libvlc_media_player_t *p_mi, float f_pos );
+LIBVLC_API int libvlc_media_player_set_position( libvlc_media_player_t *p_mi,
+                                                 float f_pos, bool b_fast );
 
 /**
  * Set movie chapter (if applicable).
@@ -703,16 +1143,6 @@ LIBVLC_API int libvlc_media_player_get_chapter( libvlc_media_player_t *p_mi );
  * \return number of chapters in movie, or -1.
  */
 LIBVLC_API int libvlc_media_player_get_chapter_count( libvlc_media_player_t *p_mi );
-
-/**
- * Is the player able to play
- *
- * \param p_mi the Media Player
- * \return boolean
- *
- * \libvlc_return_bool
- */
-LIBVLC_API int libvlc_media_player_will_play( libvlc_media_player_t *p_mi );
 
 /**
  * Get title chapter count
@@ -791,16 +1221,6 @@ LIBVLC_API int libvlc_media_player_set_rate( libvlc_media_player_t *p_mi, float 
 LIBVLC_API libvlc_state_t libvlc_media_player_get_state( libvlc_media_player_t *p_mi );
 
 /**
- * Get movie fps rate
- *
- * \param p_mi the Media Player
- * \return frames per second (fps) for this playing movie, or 0 if unspecified
- */
-LIBVLC_API float libvlc_media_player_get_fps( libvlc_media_player_t *p_mi );
-
-/** end bug */
-
-/**
  * How many video outputs does this media player have?
  *
  * \param p_mi the media player
@@ -812,32 +1232,30 @@ LIBVLC_API unsigned libvlc_media_player_has_vout( libvlc_media_player_t *p_mi );
  * Is this media player seekable?
  *
  * \param p_mi the media player
- * \return true if the media player can seek
- *
- * \libvlc_return_bool
+ * \retval true media player can seek
+ * \retval false media player cannot seek
  */
-LIBVLC_API int libvlc_media_player_is_seekable( libvlc_media_player_t *p_mi );
+LIBVLC_API bool libvlc_media_player_is_seekable(libvlc_media_player_t *p_mi);
 
 /**
  * Can this media player be paused?
  *
  * \param p_mi the media player
- * \return true if the media player can pause
- *
- * \libvlc_return_bool
+ * \retval true media player can be paused
+ * \retval false media player cannot be paused
  */
-LIBVLC_API int libvlc_media_player_can_pause( libvlc_media_player_t *p_mi );
+LIBVLC_API bool libvlc_media_player_can_pause(libvlc_media_player_t *p_mi);
 
 /**
  * Check if the current program is scrambled
  *
  * \param p_mi the media player
- * \return true if the current program is scrambled
+ * \retval true current program is scrambled
+ * \retval false current program is not scrambled
  *
- * \libvlc_return_bool
  * \version LibVLC 2.2.0 or later
  */
-LIBVLC_API int libvlc_media_player_program_scrambled( libvlc_media_player_t *p_mi );
+LIBVLC_API bool libvlc_media_player_program_scrambled( libvlc_media_player_t *p_mi );
 
 /**
  * Display the next frame (if supported)
@@ -867,17 +1285,173 @@ LIBVLC_API void libvlc_media_player_navigate( libvlc_media_player_t* p_mi,
 LIBVLC_API void libvlc_media_player_set_video_title_display( libvlc_media_player_t *p_mi, libvlc_position_t position, unsigned int timeout );
 
 /**
+ * Get the track list for one type
+ *
+ * \version LibVLC 4.0.0 and later.
+ *
+ * \note You need to call libvlc_media_parse_with_options() or play the media
+ * at least once before calling this function.  Not doing this will result in
+ * an empty list.
+ *
+ * \note This track list is a snapshot of the current tracks when this function
+ * is called. If a track is updated after this call, the user will need to call
+ * this function again to get the updated track.
+ *
+ *
+ * The track list can be used to get track informations and to select specific
+ * tracks.
+ *
+ * \param p_mi the media player
+ * \param type type of the track list to request
+ *
+ * \return a valid libvlc_media_tracklist_t or NULL in case of error, if there
+ * is no track for a category, the returned list will have a size of 0, delete
+ * with libvlc_media_tracklist_delete()
+ */
+LIBVLC_API libvlc_media_tracklist_t *
+libvlc_media_player_get_tracklist( libvlc_media_player_t *p_mi,
+                                   libvlc_track_type_t type );
+
+
+/**
+ * Get the selected track for one type
+ *
+ * \version LibVLC 4.0.0 and later.
+ *
+ * \warning More than one tracks can be selected for one type. In that case,
+ * libvlc_media_player_get_tracklist() should be used.
+ *
+ * \param p_mi the media player
+ * \param type type of the selected track
+ *
+ * \return a valid track or NULL if there is no selected tracks for this type,
+ * release it with libvlc_media_track_release().
+ */
+LIBVLC_API libvlc_media_track_t *
+libvlc_media_player_get_selected_track( libvlc_media_player_t *p_mi,
+                                        libvlc_track_type_t type );
+
+/*
+ * Get a track from a track id
+ *
+ * \version LibVLC 4.0.0 and later.
+ *
+ * This function can be used to get the last updated informations of a track.
+ *
+ * \param p_mi the media player
+ * \param psz_id valid string representing a track id (cf. psz_id from \ref
+ * libvlc_media_track_t)
+ *
+ * \return a valid track or NULL if there is currently no tracks identified by
+ * the string id, release it with libvlc_media_track_release().
+ */
+LIBVLC_API libvlc_media_track_t *
+libvlc_media_player_get_track_from_id( libvlc_media_player_t *p_mi,
+                                       const char *psz_id );
+
+
+/**
+ * Select a track or unselect all tracks for one type
+ *
+ * \version LibVLC 4.0.0 and later.
+ *
+ * \note Use libvlc_media_player_select_tracks() for multiple selection
+ *
+ * \param p_mi the media player
+ * \param type type of the selected track
+ * \param track track to select or NULL to unselect all tracks of for this type
+ */
+LIBVLC_API void
+libvlc_media_player_select_track( libvlc_media_player_t *p_mi,
+                                  libvlc_track_type_t type,
+                                  const libvlc_media_track_t *track );
+
+/**
+ * Select multiple tracks for one type
+ *
+ * \version LibVLC 4.0.0 and later.
+ *
+ * \note The internal track list can change between the calls of
+ * libvlc_media_player_get_tracklist() and
+ * libvlc_media_player_set_tracks(). If a track selection change but the
+ * track is not present anymore, the player will just ignore it.
+ *
+ * \note selecting multiple audio tracks is currently not supported.
+ *
+ * \param p_mi the media player
+ * \param type type of the selected track
+ * \param tracks pointer to the track array
+ * \param track_count number of tracks in the track array
+ */
+LIBVLC_API void
+libvlc_media_player_select_tracks( libvlc_media_player_t *p_mi,
+                                   libvlc_track_type_t type,
+                                   const libvlc_media_track_t **tracks,
+                                   size_t track_count );
+
+/**
+ * Select tracks by their string identifier
+ *
+ * \version LibVLC 4.0.0 and later.
+ *
+ * This function can be used pre-select a list of tracks before starting the
+ * player. It has only effect for the current media. It can also be used when
+ * the player is already started.
+ *
+ * 'str_ids' can contain more than one track id, delimited with ','. "" or any
+ * invalid track id will cause the player to unselect all tracks of that
+ * category. NULL will disable the preference for newer tracks without
+ * unselecting any current tracks.
+ *
+ * Example:
+ * - (libvlc_track_video, "video/1,video/2") will select these 2 video tracks.
+ * If there is only one video track with the id "video/0", no tracks will be
+ * selected.
+ * - (libvlc_track_type_t, "${slave_url_md5sum}/spu/0) will select one spu
+ * added by an input slave with the corresponding url.
+ *
+ * \note The string identifier of a track can be found via psz_id from \ref
+ * libvlc_media_track_t
+ *
+ * \note selecting multiple audio tracks is currently not supported.
+ *
+ * \param p_mi the media player
+ * \param type type to select
+ * \param psz_ids list of string identifier or NULL
+ */
+LIBVLC_API void
+libvlc_media_player_select_tracks_by_ids( libvlc_media_player_t *p_mi,
+                                          libvlc_track_type_t type,
+                                          const char *psz_ids );
+
+/**
+ * Add a slave to the current media player.
+ *
+ * \note If the player is playing, the slave will be added directly. This call
+ * will also update the slave list of the attached libvlc_media_t.
+ *
+ * \version LibVLC 3.0.0 and later.
+ *
+ * \see libvlc_media_slaves_add
+ *
+ * \param p_mi the media player
+ * \param i_type subtitle or audio
+ * \param psz_uri Uri of the slave (should contain a valid scheme).
+ * \param b_select True if this slave should be selected when it's loaded
+ *
+ * \return 0 on success, -1 on error.
+ */
+LIBVLC_API
+int libvlc_media_player_add_slave( libvlc_media_player_t *p_mi,
+                                   libvlc_media_slave_type_t i_type,
+                                   const char *psz_uri, bool b_select );
+
+/**
  * Release (free) libvlc_track_description_t
  *
  * \param p_track_description the structure to release
  */
 LIBVLC_API void libvlc_track_description_list_release( libvlc_track_description_t *p_track_description );
-
-/**
- * \deprecated Use libvlc_track_description_list_release instead
- */
-LIBVLC_DEPRECATED LIBVLC_API
-void libvlc_track_description_release( libvlc_track_description_t *p_track_description );
 
 /** \defgroup libvlc_video LibVLC video controls
  * @{
@@ -903,10 +1477,14 @@ LIBVLC_API void libvlc_toggle_fullscreen( libvlc_media_player_t *p_mi );
  * to the root window <b>before</b> fullscreen mode is enabled. You will want
  * to reparent it back to its normal parent when disabling fullscreen.
  *
+ * \note This setting applies to any and all current or future active video
+ * tracks and windows for the given media player. The choice of fullscreen
+ * output for each window is left to the operating system.
+ *
  * \param p_mi the media player
  * \param b_fullscreen boolean for fullscreen status
  */
-LIBVLC_API void libvlc_set_fullscreen( libvlc_media_player_t *p_mi, int b_fullscreen );
+LIBVLC_API void libvlc_set_fullscreen(libvlc_media_player_t *p_mi, bool b_fullscreen);
 
 /**
  * Get current fullscreen status.
@@ -914,9 +1492,10 @@ LIBVLC_API void libvlc_set_fullscreen( libvlc_media_player_t *p_mi, int b_fullsc
  * \param p_mi the media player
  * \return the fullscreen status (boolean)
  *
- * \libvlc_return_bool
+ * \retval false media player is windowed
+ * \retval true media player is in fullscreen mode
  */
-LIBVLC_API int libvlc_get_fullscreen( libvlc_media_player_t *p_mi );
+LIBVLC_API bool libvlc_get_fullscreen( libvlc_media_player_t *p_mi );
 
 /**
  * Enable or disable key press events handling, according to the LibVLC hotkeys
@@ -963,26 +1542,6 @@ void libvlc_video_set_mouse_input( libvlc_media_player_t *p_mi, unsigned on );
 LIBVLC_API
 int libvlc_video_get_size( libvlc_media_player_t *p_mi, unsigned num,
                            unsigned *px, unsigned *py );
-
-/**
- * Get current video height.
- * \deprecated Use libvlc_video_get_size() instead.
- *
- * \param p_mi the media player
- * \return the video pixel height or 0 if not applicable
- */
-LIBVLC_DEPRECATED LIBVLC_API
-int libvlc_video_get_height( libvlc_media_player_t *p_mi );
-
-/**
- * Get current video width.
- * \deprecated Use libvlc_video_get_size() instead.
- *
- * \param p_mi the media player
- * \return the video pixel width or 0 if not applicable
- */
-LIBVLC_DEPRECATED LIBVLC_API
-int libvlc_video_get_width( libvlc_media_player_t *p_mi );
 
 /**
  * Get the mouse pointer coordinates over a video.
@@ -1052,6 +1611,35 @@ LIBVLC_API char *libvlc_video_get_aspect_ratio( libvlc_media_player_t *p_mi );
 LIBVLC_API void libvlc_video_set_aspect_ratio( libvlc_media_player_t *p_mi, const char *psz_aspect );
 
 /**
+ * Create a video viewpoint structure.
+ *
+ * \version LibVLC 3.0.0 and later
+ *
+ * \return video viewpoint or NULL
+ *         (the result must be released with free()).
+ */
+LIBVLC_API libvlc_video_viewpoint_t *libvlc_video_new_viewpoint(void);
+
+/**
+ * Update the video viewpoint information.
+ *
+ * \note It is safe to call this function before the media player is started.
+ *
+ * \version LibVLC 3.0.0 and later
+ *
+ * \param p_mi the media player
+ * \param p_viewpoint video viewpoint allocated via libvlc_video_new_viewpoint()
+ * \param b_absolute if true replace the old viewpoint with the new one. If
+ * false, increase/decrease it.
+ * \return -1 in case of error, 0 otherwise
+ *
+ * \note the values are set asynchronously, it will be used by the next frame displayed.
+ */
+LIBVLC_API int libvlc_video_update_viewpoint( libvlc_media_player_t *p_mi,
+                                              const libvlc_video_viewpoint_t *p_viewpoint,
+                                              bool b_absolute);
+
+/**
  * Get current video subtitle.
  *
  * \param p_mi the media player
@@ -1071,7 +1659,8 @@ LIBVLC_API int libvlc_video_get_spu_count( libvlc_media_player_t *p_mi );
  * Get the description of available video subtitles.
  *
  * \param p_mi the media player
- * \return list containing description of available video subtitles
+ * \return list containing description of available video subtitles.
+ * It must be freed with libvlc_track_description_list_release()
  */
 LIBVLC_API libvlc_track_description_t *
         libvlc_video_get_spu_description( libvlc_media_player_t *p_mi );
@@ -1086,15 +1675,6 @@ LIBVLC_API libvlc_track_description_t *
 LIBVLC_API int libvlc_video_set_spu( libvlc_media_player_t *p_mi, int i_spu );
 
 /**
- * Set new video subtitle file.
- *
- * \param p_mi the media player
- * \param psz_subtitle new video subtitle file
- * \return the success status (boolean)
- */
-LIBVLC_API int libvlc_video_set_subtitle_file( libvlc_media_player_t *p_mi, const char *psz_subtitle );
-
-/**
  * Get the current subtitle delay. Positive values means subtitles are being
  * displayed later, negative values earlier.
  *
@@ -1103,6 +1683,25 @@ LIBVLC_API int libvlc_video_set_subtitle_file( libvlc_media_player_t *p_mi, cons
  * \version LibVLC 2.0.0 or later
  */
 LIBVLC_API int64_t libvlc_video_get_spu_delay( libvlc_media_player_t *p_mi );
+
+/**
+ * Set the subtitle text scale.
+ *
+ * The scale factor is expressed as a percentage of the default size, where
+ * 1.0 represents 100 percent.
+ *
+ * A value of 0.5 would result in text half the normal size, and a value of 2.0
+ * would result in text twice the normal size.
+ *
+ * The minimum acceptable value for the scale factor is 0.1.
+ *
+ * The maximum is 5.0 (five times normal size).
+ *
+ * \param p_mi media player
+ * \param f_scale scale factor in the range [0.1;5.0] (default: 1.0)
+ * \version LibVLC 4.0.0 or later
+ */
+LIBVLC_API void libvlc_video_set_spu_text_scale( libvlc_media_player_t *p_mi, float f_scale );
 
 /**
  * Set the subtitle delay. This affects the timing of when the subtitle will
@@ -1119,43 +1718,144 @@ LIBVLC_API int64_t libvlc_video_get_spu_delay( libvlc_media_player_t *p_mi );
 LIBVLC_API int libvlc_video_set_spu_delay( libvlc_media_player_t *p_mi, int64_t i_delay );
 
 /**
- * Get the description of available titles.
+ * Get the full description of available titles
+ *
+ * \version LibVLC 3.0.0 and later.
  *
  * \param p_mi the media player
- * \return list containing description of available titles
+ * \param titles address to store an allocated array of title descriptions
+ *        descriptions (must be freed with libvlc_title_descriptions_release()
+ *        by the caller) [OUT]
+ *
+ * \return the number of titles (-1 on error)
  */
-LIBVLC_API libvlc_track_description_t *
-        libvlc_video_get_title_description( libvlc_media_player_t *p_mi );
+LIBVLC_API int libvlc_media_player_get_full_title_descriptions( libvlc_media_player_t *p_mi,
+                                                                libvlc_title_description_t ***titles );
 
 /**
- * Get the description of available chapters for specific title.
+ * Release a title description
  *
- * \param p_mi the media player
- * \param i_title selected title
- * \return list containing description of available chapter for title i_title
- */
-LIBVLC_API libvlc_track_description_t *
-        libvlc_video_get_chapter_description( libvlc_media_player_t *p_mi, int i_title );
-
-/**
- * Get current crop filter geometry.
+ * \version LibVLC 3.0.0 and later
  *
- * \param p_mi the media player
- * \return the crop filter geometry or NULL if unset
- */
-LIBVLC_API char *libvlc_video_get_crop_geometry( libvlc_media_player_t *p_mi );
-
-/**
- * Set new crop filter geometry.
- *
- * \param p_mi the media player
- * \param psz_geometry new crop filter geometry (NULL to unset)
+ * \param p_titles title description array to release
+ * \param i_count number of title descriptions to release
  */
 LIBVLC_API
-void libvlc_video_set_crop_geometry( libvlc_media_player_t *p_mi, const char *psz_geometry );
+    void libvlc_title_descriptions_release( libvlc_title_description_t **p_titles,
+                                            unsigned i_count );
 
 /**
- * Get current teletext page requested.
+ * Get the full description of available chapters
+ *
+ * \version LibVLC 3.0.0 and later.
+ *
+ * \param p_mi the media player
+ * \param i_chapters_of_title index of the title to query for chapters (uses current title if set to -1)
+ * \param pp_chapters address to store an allocated array of chapter descriptions
+ *        descriptions (must be freed with libvlc_chapter_descriptions_release()
+ *        by the caller) [OUT]
+ *
+ * \return the number of chapters (-1 on error)
+ */
+LIBVLC_API int libvlc_media_player_get_full_chapter_descriptions( libvlc_media_player_t *p_mi,
+                                                                  int i_chapters_of_title,
+                                                                  libvlc_chapter_description_t *** pp_chapters );
+
+/**
+ * Release a chapter description
+ *
+ * \version LibVLC 3.0.0 and later
+ *
+ * \param p_chapters chapter description array to release
+ * \param i_count number of chapter descriptions to release
+ */
+LIBVLC_API
+void libvlc_chapter_descriptions_release( libvlc_chapter_description_t **p_chapters,
+                                          unsigned i_count );
+
+/**
+ * Set/unset the video crop ratio.
+ *
+ * This function forces a crop ratio on any and all video tracks rendered by
+ * the media player. If the display aspect ratio of a video does not match the
+ * crop ratio, either the top and bottom, or the left and right of the video
+ * will be cut out to fit the crop ratio.
+ *
+ * For instance, a ratio of 1:1 will force the video to a square shape.
+ *
+ * To disable video crop, set a crop ratio with zero as denominator.
+ *
+ * A call to this function overrides any previous call to any of
+ * libvlc_video_set_crop_ratio(), libvlc_video_set_crop_border() and/or
+ * libvlc_video_set_crop_window().
+ *
+ * \see libvlc_video_set_aspect_ratio()
+ *
+ * \param mp the media player
+ * \param num crop ratio numerator (ignored if denominator is 0)
+ * \param den crop ratio denominator (or 0 to unset the crop ratio)
+ *
+ * \version LibVLC 4.0.0 and later
+ */
+LIBVLC_API
+void libvlc_video_set_crop_ratio(libvlc_media_player_t *mp,
+                                 unsigned num, unsigned den);
+
+/**
+ * Set the video crop window.
+ *
+ * This function selects a sub-rectangle of video to show. Any pixels outside
+ * the rectangle will not be shown.
+ *
+ * To unset the video crop window, use libvlc_video_set_crop_ratio() or
+ * libvlc_video_set_crop_border().
+ *
+ * A call to this function overrides any previous call to any of
+ * libvlc_video_set_crop_ratio(), libvlc_video_set_crop_border() and/or
+ * libvlc_video_set_crop_window().
+ *
+ * \param mp the media player
+ * \param x abscissa (i.e. leftmost sample column offset) of the crop window
+ * \param y ordinate (i.e. topmost sample row offset) of the crop window
+ * \param width sample width of the crop window (cannot be zero)
+ * \param height sample height of the crop window (cannot be zero)
+ *
+ * \version LibVLC 4.0.0 and later
+ */
+LIBVLC_API
+void libvlc_video_set_crop_window(libvlc_media_player_t *mp,
+                                  unsigned x, unsigned y,
+                                  unsigned width, unsigned height);
+
+/**
+ * Set the video crop borders.
+ *
+ * This function selects the size of video edges to be cropped out.
+ *
+ * To unset the video crop borders, set all borders to zero.
+ *
+ * A call to this function overrides any previous call to any of
+ * libvlc_video_set_crop_ratio(), libvlc_video_set_crop_border() and/or
+ * libvlc_video_set_crop_window().
+ *
+ * \param mp the media player
+ * \param left number of sample columns to crop on the left
+ * \param right number of sample columns to crop on the right
+ * \param top number of sample rows to crop on the top
+ * \param bottom number of sample rows to corp on the bottom
+ *
+ * \version LibVLC 4.0.0 and later
+ */
+LIBVLC_API
+void libvlc_video_set_crop_border(libvlc_media_player_t *mp,
+                                  unsigned left, unsigned right,
+                                  unsigned top, unsigned bottom);
+
+/**
+ * Get current teletext page requested or 0 if it's disabled.
+ *
+ * Teletext is disabled by default, call libvlc_video_set_teletext() to enable
+ * it.
  *
  * \param p_mi the media player
  * \return the current teletext page requested.
@@ -1165,17 +1865,14 @@ LIBVLC_API int libvlc_video_get_teletext( libvlc_media_player_t *p_mi );
 /**
  * Set new teletext page to retrieve.
  *
- * \param p_mi the media player
- * \param i_page teletex page number requested
- */
-LIBVLC_API void libvlc_video_set_teletext( libvlc_media_player_t *p_mi, int i_page );
-
-/**
- * Toggle teletext transparent status on video output.
+ * This function can also be used to send a teletext key.
  *
  * \param p_mi the media player
+ * \param i_page teletex page number requested. This value can be 0 to disable
+ * teletext, a number in the range ]0;1000[ to show the requested page, or a
+ * \ref libvlc_teletext_key_t. 100 is the default teletext page.
  */
-LIBVLC_API void libvlc_toggle_teletext( libvlc_media_player_t *p_mi );
+LIBVLC_API void libvlc_video_set_teletext( libvlc_media_player_t *p_mi, int i_page );
 
 /**
  * Get number of available video tracks.
@@ -1189,7 +1886,8 @@ LIBVLC_API int libvlc_video_get_track_count( libvlc_media_player_t *p_mi );
  * Get the description of available video tracks.
  *
  * \param p_mi media player
- * \return list with description of available video tracks, or NULL on error
+ * \return list with description of available video tracks, or NULL on error.
+ * It must be freed with libvlc_track_description_list_release()
  */
 LIBVLC_API libvlc_track_description_t *
         libvlc_video_get_track_description( libvlc_media_player_t *p_mi );
@@ -1220,7 +1918,7 @@ int libvlc_video_set_track( libvlc_media_player_t *p_mi, int i_track );
  *
  * \param p_mi media player instance
  * \param num number of video output (typically 0 for the first/only one)
- * \param psz_filepath the path where to save the screenshot to
+ * \param psz_filepath the path of a file or a folder to save the screenshot into
  * \param i_width the snapshot's width
  * \param i_height the snapshot's height
  * \return 0 on success, -1 if the video was not found
@@ -1234,28 +1932,22 @@ int libvlc_video_take_snapshot( libvlc_media_player_t *p_mi, unsigned num,
  * Enable or disable deinterlace filter
  *
  * \param p_mi libvlc media player
- * \param psz_mode type of deinterlace filter, NULL to disable
+ * \param deinterlace state -1: auto (default), 0: disabled, 1: enabled
+ * \param psz_mode type of deinterlace filter, NULL for current/default filter
+ * \version LibVLC 4.0.0 and later
  */
 LIBVLC_API void libvlc_video_set_deinterlace( libvlc_media_player_t *p_mi,
-                                                  const char *psz_mode );
+                                              int deinterlace,
+                                              const char *psz_mode );
 
 /**
  * Get an integer marquee option value
  *
  * \param p_mi libvlc media player
- * \param option marq option to get \see libvlc_video_marquee_int_option_t
+ * \param option marq option to get \see libvlc_video_marquee_option_t
  */
 LIBVLC_API int libvlc_video_get_marquee_int( libvlc_media_player_t *p_mi,
                                                  unsigned option );
-
-/**
- * Get a string marquee option value
- *
- * \param p_mi libvlc media player
- * \param option marq option to get \see libvlc_video_marquee_string_option_t
- */
-LIBVLC_API char *libvlc_video_get_marquee_string( libvlc_media_player_t *p_mi,
-                                                      unsigned option );
 
 /**
  * Enable, disable or set an integer marquee option
@@ -1264,7 +1956,7 @@ LIBVLC_API char *libvlc_video_get_marquee_string( libvlc_media_player_t *p_mi,
  * or disabling (arg 0) the marq filter.
  *
  * \param p_mi libvlc media player
- * \param option marq option to set \see libvlc_video_marquee_int_option_t
+ * \param option marq option to set \see libvlc_video_marquee_option_t
  * \param i_val marq option value
  */
 LIBVLC_API void libvlc_video_set_marquee_int( libvlc_media_player_t *p_mi,
@@ -1274,7 +1966,7 @@ LIBVLC_API void libvlc_video_set_marquee_int( libvlc_media_player_t *p_mi,
  * Set a marquee string option
  *
  * \param p_mi libvlc media player
- * \param option marq option to set \see libvlc_video_marquee_string_option_t
+ * \param option marq option to set \see libvlc_video_marquee_option_t
  * \param psz_text marq option value
  */
 LIBVLC_API void libvlc_video_set_marquee_string( libvlc_media_player_t *p_mi,
@@ -1389,21 +2081,6 @@ LIBVLC_API void libvlc_video_set_adjust_float( libvlc_media_player_t *p_mi,
  */
 
 /**
- * Audio device types
- */
-typedef enum libvlc_audio_output_device_types_t {
-    libvlc_AudioOutputDevice_Error  = -1,
-    libvlc_AudioOutputDevice_Mono   =  1,
-    libvlc_AudioOutputDevice_Stereo =  2,
-    libvlc_AudioOutputDevice_2F2R   =  4,
-    libvlc_AudioOutputDevice_3F2R   =  5,
-    libvlc_AudioOutputDevice_5_1    =  6,
-    libvlc_AudioOutputDevice_6_1    =  7,
-    libvlc_AudioOutputDevice_7_1    =  8,
-    libvlc_AudioOutputDevice_SPDIF  = 10
-} libvlc_audio_output_device_types_t;
-
-/**
  * Audio channels
  */
 typedef enum libvlc_audio_output_channel_t {
@@ -1417,10 +2094,10 @@ typedef enum libvlc_audio_output_channel_t {
 
 
 /**
- * Gets the list of available audio outputs
+ * Gets the list of available audio output modules.
  *
  * \param p_instance libvlc instance
- * \return list of available audio outputs. It must be freed it with
+ * \return list of available audio outputs. It must be freed with
 *          \see libvlc_audio_output_list_release \see libvlc_audio_output_t .
  *         In case of error, NULL is returned.
  */
@@ -1428,7 +2105,7 @@ LIBVLC_API libvlc_audio_output_t *
 libvlc_audio_output_list_get( libvlc_instance_t *p_instance );
 
 /**
- * Frees the list of available audio outputs
+ * Frees the list of available audio output modules.
  *
  * \param p_list list with audio outputs for release
  */
@@ -1436,45 +2113,41 @@ LIBVLC_API
 void libvlc_audio_output_list_release( libvlc_audio_output_t *p_list );
 
 /**
- * Sets the audio output.
+ * Selects an audio output module.
  * \note Any change will take be effect only after playback is stopped and
  * restarted. Audio output cannot be changed while playing.
  *
  * \param p_mi media player
  * \param psz_name name of audio output,
  *               use psz_name of \see libvlc_audio_output_t
- * \return 0 if function succeded, -1 on error
+ * \return 0 if function succeeded, -1 on error
  */
 LIBVLC_API int libvlc_audio_output_set( libvlc_media_player_t *p_mi,
                                         const char *psz_name );
 
 /**
- * Backward compatibility stub. Do not use in new code.
- * Use libvlc_audio_output_device_list_get() instead.
- * \return always 0.
+ * Gets a list of potential audio output devices,
+ * \see libvlc_audio_output_device_set().
+ *
+ * \note Not all audio outputs support enumerating devices.
+ * The audio output may be functional even if the list is empty (NULL).
+ *
+ * \note The list may not be exhaustive.
+ *
+ * \warning Some audio output devices in the list might not actually work in
+ * some circumstances. By default, it is recommended to not specify any
+ * explicit audio device.
+ *
+ * \param mp media player
+ * \return A NULL-terminated linked list of potential audio output devices.
+ * It must be freed with libvlc_audio_output_device_list_release()
+ * \version LibVLC 2.2.0 or later.
  */
-LIBVLC_DEPRECATED LIBVLC_API
-int libvlc_audio_output_device_count( libvlc_instance_t *, const char * );
+LIBVLC_API libvlc_audio_output_device_t *
+libvlc_audio_output_device_enum( libvlc_media_player_t *mp );
 
 /**
- * Backward compatibility stub. Do not use in new code.
- * Use libvlc_audio_output_device_list_get() instead.
- * \return always NULL.
- */
-LIBVLC_DEPRECATED LIBVLC_API
-char *libvlc_audio_output_device_longname( libvlc_instance_t *, const char *,
-                                           int );
-
-/**
- * Backward compatibility stub. Do not use in new code.
- * Use libvlc_audio_output_device_list_get() instead.
- * \return always NULL.
- */
-LIBVLC_DEPRECATED LIBVLC_API
-char *libvlc_audio_output_device_id( libvlc_instance_t *, const char *, int );
-
-/**
- * Gets a list of audio output devices for a given audio output.
+ * Gets a list of audio output devices for a given audio output module,
  * \see libvlc_audio_output_device_set().
  *
  * \note Not all audio outputs support this. In particular, an empty (NULL)
@@ -1488,10 +2161,10 @@ char *libvlc_audio_output_device_id( libvlc_instance_t *, const char *, int );
  * explicit audio device.
  *
  * \param p_instance libvlc instance
- * \param psz_aout audio output name
+ * \param aout audio output name
  *                 (as returned by libvlc_audio_output_list_get())
  * \return A NULL-terminated linked list of potential audio output devices.
- * It must be freed it with libvlc_audio_output_device_list_release()
+ * It must be freed with libvlc_audio_output_device_list_release()
  * \version LibVLC 2.1.0 or later.
  */
 LIBVLC_API libvlc_audio_output_device_t *
@@ -1508,41 +2181,69 @@ LIBVLC_API void libvlc_audio_output_device_list_release(
                                         libvlc_audio_output_device_t *p_list );
 
 /**
- * Configures an explicit audio output device for a given audio output plugin.
- * A list of possible devices can be obtained with
+ * Configures an explicit audio output device.
+ *
+ * If the module paramater is NULL, audio output will be moved to the device
+ * specified by the device identifier string immediately. This is the
+ * recommended usage.
+ *
+ * A list of adequate potential device strings can be obtained with
+ * libvlc_audio_output_device_enum().
+ *
+ * However passing NULL is supported in LibVLC version 2.2.0 and later only;
+ * in earlier versions, this function would have no effects when the module
+ * parameter was NULL.
+ *
+ * If the module parameter is not NULL, the device parameter of the
+ * corresponding audio output, if it exists, will be set to the specified
+ * string. Note that some audio output modules do not have such a parameter
+ * (notably MMDevice and PulseAudio).
+ *
+ * A list of adequate potential device strings can be obtained with
  * libvlc_audio_output_device_list_get().
  *
  * \note This function does not select the specified audio output plugin.
  * libvlc_audio_output_set() is used for that purpose.
  *
  * \warning The syntax for the device parameter depends on the audio output.
- * This is not portable. Only use this function if you know what you are doing.
- * Some audio outputs do not support this function (e.g. PulseAudio, WASAPI).
- * Some audio outputs require further parameters (e.g. ALSA: channels map).
  *
- * \param p_mi media player
- * \param psz_audio_output - name of audio output, \see libvlc_audio_output_t
- * \param psz_device_id device
- * \return Nothing. Errors are ignored.
+ * Some audio output modules require further parameters (e.g. a channels map
+ * in the case of ALSA).
+ *
+ * \param mp media player
+ * \param module If NULL, current audio output module.
+ *               if non-NULL, name of audio output module
+                 (\see libvlc_audio_output_t)
+ * \param device_id device identifier string
+ * \return Nothing. Errors are ignored (this is a design bug).
  */
-LIBVLC_API void libvlc_audio_output_device_set( libvlc_media_player_t *p_mi,
-                                                const char *psz_audio_output,
-                                                const char *psz_device_id );
+LIBVLC_API void libvlc_audio_output_device_set( libvlc_media_player_t *mp,
+                                                const char *module,
+                                                const char *device_id );
 
 /**
- * Stub for backward compatibility.
- * \return always -1.
+ * Get the current audio output device identifier.
+ *
+ * This complements libvlc_audio_output_device_set().
+ *
+ * \warning The initial value for the current audio output device identifier
+ * may not be set or may be some unknown value. A LibVLC application should
+ * compare this value against the known device identifiers (e.g. those that
+ * were previously retrieved by a call to libvlc_audio_output_device_enum or
+ * libvlc_audio_output_device_list_get) to find the current audio output device.
+ *
+ * It is possible that the selected audio output device changes (an external
+ * change) without a call to libvlc_audio_output_device_set. That may make this
+ * method unsuitable to use if a LibVLC application is attempting to track
+ * dynamic audio device changes as they happen.
+ *
+ * \param mp media player
+ * \return the current audio output device identifier
+ *         NULL if no device is selected or in case of error
+ *         (the result must be released with free()).
+ * \version LibVLC 3.0.0 or later.
  */
-LIBVLC_DEPRECATED
-LIBVLC_API int libvlc_audio_output_get_device_type( libvlc_media_player_t *p_mi );
-
-/**
- * Stub for backward compatibility.
- */
-LIBVLC_DEPRECATED
-LIBVLC_API void libvlc_audio_output_set_device_type( libvlc_media_player_t *,
-                                                     int );
-
+LIBVLC_API char *libvlc_audio_output_device_get( libvlc_media_player_t *mp );
 
 /**
  * Toggle mute status.
@@ -1607,7 +2308,8 @@ LIBVLC_API int libvlc_audio_get_track_count( libvlc_media_player_t *p_mi );
  * Get the description of available audio tracks.
  *
  * \param p_mi media player
- * \return list with description of available audio tracks, or NULL
+ * \return list with description of available audio tracks, or NULL.
+ * It must be freed with libvlc_track_description_list_release()
  */
 LIBVLC_API libvlc_track_description_t *
         libvlc_audio_get_track_description( libvlc_media_player_t *p_mi );
@@ -1731,6 +2433,7 @@ LIBVLC_API libvlc_equalizer_t *libvlc_audio_equalizer_new( void );
  *
  * \param u_index index of the preset, counting from zero
  * \return opaque equalizer handle, or NULL on error
+ *         (it must be released with libvlc_audio_equalizer_release())
  * \version LibVLC 2.2.0 or later
  */
 LIBVLC_API libvlc_equalizer_t *libvlc_audio_equalizer_new_from_preset( unsigned u_index );
@@ -1793,7 +2496,7 @@ LIBVLC_API int libvlc_audio_equalizer_set_amp_at_index( libvlc_equalizer_t *p_eq
  *
  * \param p_equalizer valid equalizer handle, must not be NULL
  * \param u_band index, counting from zero, of the frequency band to get
- * \return amplification value (Hz); zero if there is no such frequency band
+ * \return amplification value (Hz); NaN if there is no such frequency band
  * \version LibVLC 2.2.0 or later
  */
 LIBVLC_API float libvlc_audio_equalizer_get_amp_at_index( libvlc_equalizer_t *p_equalizer, unsigned u_band );
@@ -1828,6 +2531,47 @@ LIBVLC_API float libvlc_audio_equalizer_get_amp_at_index( libvlc_equalizer_t *p_
  * \version LibVLC 2.2.0 or later
  */
 LIBVLC_API int libvlc_media_player_set_equalizer( libvlc_media_player_t *p_mi, libvlc_equalizer_t *p_equalizer );
+
+/**
+ * Media player roles.
+ *
+ * \version LibVLC 3.0.0 and later.
+ *
+ * See \ref libvlc_media_player_set_role()
+ */
+typedef enum libvlc_media_player_role {
+    libvlc_role_None = 0, /**< Don't use a media player role */
+    libvlc_role_Music,   /**< Music (or radio) playback */
+    libvlc_role_Video, /**< Video playback */
+    libvlc_role_Communication, /**< Speech, real-time communication */
+    libvlc_role_Game, /**< Video game */
+    libvlc_role_Notification, /**< User interaction feedback */
+    libvlc_role_Animation, /**< Embedded animation (e.g. in web page) */
+    libvlc_role_Production, /**< Audio editting/production */
+    libvlc_role_Accessibility, /**< Accessibility */
+    libvlc_role_Test /** Testing */
+#define libvlc_role_Last libvlc_role_Test
+} libvlc_media_player_role_t;
+
+/**
+ * Gets the media role.
+ *
+ * \version LibVLC 3.0.0 and later.
+ *
+ * \param p_mi media player
+ * \return the media player role (\ref libvlc_media_player_role_t)
+ */
+LIBVLC_API int libvlc_media_player_get_role(libvlc_media_player_t *p_mi);
+
+/**
+ * Sets the media role.
+ *
+ * \param p_mi media player
+ * \param role the media player role (\ref libvlc_media_player_role_t)
+ * \return 0 on success, -1 on error
+ */
+LIBVLC_API int libvlc_media_player_set_role(libvlc_media_player_t *p_mi,
+                                            unsigned role);
 
 /** @} audio */
 

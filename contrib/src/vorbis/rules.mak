@@ -1,32 +1,38 @@
 # libvorbis
 
-VORBIS_VERSION := 1.3.4
+VORBIS_VERSION := 1.3.6
 VORBIS_URL := http://downloads.xiph.org/releases/vorbis/libvorbis-$(VORBIS_VERSION).tar.xz
-#VORBIS_URL := $(CONTRIB_VIDEOLAN)/libvorbis-$(VORBIS_VERSION).tar.gz
 
 ifdef HAVE_FPU
 PKGS += vorbis
 endif
+ifdef BUILD_ENCODERS
+PKGS += vorbis
+endif
+
 ifeq ($(call need_pkg,"vorbis >= 1.1"),)
+ifdef BUILD_ENCODERS
+ifeq ($(call need_pkg,"vorbisenc >= 1.1"),)
 PKGS_FOUND += vorbis
 endif
-PKGS_ALL += vorbisenc
-ifdef BUILD_ENCODERS
-PKGS += vorbisenc
+else
+PKGS_FOUND += vorbis
 endif
-ifeq ($(call need_pkg,"vorbisenc >= 1.1"),)
-PKGS_FOUND += vorbisenc
 endif
 
 $(TARBALLS)/libvorbis-$(VORBIS_VERSION).tar.xz:
-	$(call download,$(VORBIS_URL))
+	$(call download_pkg,$(VORBIS_URL),vorbis)
 
 .sum-vorbis: libvorbis-$(VORBIS_VERSION).tar.xz
 
 libvorbis: libvorbis-$(VORBIS_VERSION).tar.xz .sum-vorbis
 	$(UNPACK)
-	$(APPLY) $(SRC)/vorbis/osx.patch
+ifdef HAVE_CLANG
+	$(APPLY) $(SRC)/vorbis/clang.patch
+endif
 	$(UPDATE_AUTOCONFIG)
+	$(APPLY) $(SRC)/vorbis/vorbis-bitcode.patch
+	$(call pkg_static,"vorbis.pc.in")
 	$(MOVE)
 
 DEPS_vorbis = ogg $(DEPS_ogg)
@@ -35,12 +41,4 @@ DEPS_vorbis = ogg $(DEPS_ogg)
 	$(RECONF) -Im4
 	cd $< && $(HOSTVARS) ./configure $(HOSTCONF) --disable-docs --disable-examples --disable-oggtest
 	cd $< && $(MAKE) install
-	touch $@
-
-.sum-vorbisenc: .sum-vorbis
-	touch $@
-
-DEPS_vorbisenc = vorbis $(DEPS_vorbis)
-
-.vorbisenc:
 	touch $@

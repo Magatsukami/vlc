@@ -2,7 +2,6 @@
  * ustring.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -71,7 +70,7 @@ UString::UString( intf_thread_t *pIntf, const char *pString ):
     }
     if( !pCur || *pCur )
     {
-        msg_Err( pIntf, "invalid UTF8 string: %s", pString );
+        msg_Err( pIntf, "invalid UTF8 string: %s", pString ? pString : "nil" );
         m_length = 0;
         m_pString = NULL;
         return;
@@ -326,7 +325,7 @@ UString UString::substr( uint32_t position, uint32_t n) const
 
 UString UString::fromInt( intf_thread_t *pIntf, int number)
 {
-    stringstream ss;
+    std::stringstream ss;
     ss << number;
     return UString( pIntf, ss.str().c_str() );
 }

@@ -3,7 +3,6 @@
  *****************************************************************************
  * Copyright (C) 2001-2005 VLC authors and VideoLAN
  * Copyright (C) 2007 Remi Denis-Courmont
- * $Id$
  *
  * Authors: Christophe Massiot <massiot@via.ecp.fr>
  *          Tristan Leteurtre <tooney@via.ecp.fr>
@@ -36,75 +35,132 @@
 # include "config.h"
 #endif
 
-#include <errno.h>
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_access.h>
 #include <vlc_network.h>
 #include <vlc_block.h>
+#include <vlc_interrupt.h>
+#ifdef HAVE_POLL_H
+# include <poll.h>
+#endif
+#ifdef HAVE_SYS_UIO_H
+# include <sys/uio.h>
+#endif
 
-#define MTU 65535
+/* Buffer can be max theoretical datagram content minus anticipated MTU.
+ * IPv6 headers are larger than IPv4, ignore IPv6 jumbograms.
+ */
+#define MRU 65507u
 
-/*****************************************************************************
- * Module descriptor
- *****************************************************************************/
-static int  Open( vlc_object_t * );
-static void Close( vlc_object_t * );
-
-#define BUFFER_TEXT N_("Receive buffer")
-#define BUFFER_LONGTEXT N_("UDP receive buffer size (bytes)" )
-
-vlc_module_begin ()
-    set_shortname( N_("UDP" ) )
-    set_description( N_("UDP input") )
-    set_category( CAT_INPUT )
-    set_subcategory( SUBCAT_INPUT_ACCESS )
-
-    add_obsolete_integer( "server-port" ) /* since 2.0.0 */
-    add_integer( "udp-buffer", 0x400000, BUFFER_TEXT, BUFFER_LONGTEXT, true )
-
-    set_capability( "access", 0 )
-    add_shortcut( "udp", "udpstream", "udp4", "udp6" )
-
-    set_callbacks( Open, Close )
-vlc_module_end ()
-
-struct access_sys_t
-{
+typedef struct {
     int fd;
-    size_t fifo_size;
-    block_fifo_t *fifo;
-    vlc_thread_t thread;
-};
+    int timeout;
 
-/*****************************************************************************
- * Local prototypes
- *****************************************************************************/
-static block_t *BlockUDP( access_t * );
-static int Control( access_t *, int, va_list );
-static void* ThreadRead( void *data );
+    size_t length;
+    char *offset;
+    char buf[MRU];
+} access_sys_t;
+
+static int Control(stream_t *access, int query, va_list args)
+{
+    switch (query) {
+        case STREAM_CAN_SEEK:
+        case STREAM_CAN_FASTSEEK:
+        case STREAM_CAN_PAUSE:
+        case STREAM_CAN_CONTROL_PACE:
+            *va_arg(args, bool *) = false;
+            break;
+
+        case STREAM_GET_PTS_DELAY:
+            *va_arg(args, vlc_tick_t *) =
+                VLC_TICK_FROM_MS(var_InheritInteger(access, "network-caching"));
+            break;
+
+        default:
+            return VLC_EGENERIC;
+    }
+    return VLC_SUCCESS;
+}
+
+static ssize_t Read(stream_t *access, void *buf, size_t len)
+{
+    access_sys_t *sys = access->p_sys;
+
+    if (sys->length > 0) {
+        if (len > sys->length)
+            len = sys->length;
+
+        memcpy(buf, sys->offset, len);
+        sys->offset += len;
+        sys->length -= len;
+        return len;
+    }
+
+    struct pollfd ufd[1];
+
+    ufd[0].fd = sys->fd;
+    ufd[0].events = POLLIN;
+
+    switch (vlc_poll_i11e(ufd, 1, sys->timeout)) {
+        case 0:
+            msg_Err(access, "receive time-out");
+            return 0;
+        case -1:
+            return -1;
+    }
+
+    struct iovec iov[] = {
+        { .iov_base = buf,      .iov_len = len, },
+        { .iov_base = sys->buf, .iov_len = MRU, },
+    };
+    struct msghdr msg = {
+        .msg_iov = iov,
+        .msg_iovlen = ARRAY_SIZE(iov),
+    };
+    ssize_t val = recvmsg(sys->fd, &msg, 0);
+
+    if (val <= 0) /* empty (0 bytes) payload does *not* mean EOF here */
+        return -1;
+
+    if (unlikely((size_t)val > len)) {
+        sys->offset = sys->buf;
+        sys->length = val - len;
+        val = len;
+    }
+
+    return val;
+}
 
 /*****************************************************************************
  * Open: open the socket
  *****************************************************************************/
 static int Open( vlc_object_t *p_this )
 {
-    access_t     *p_access = (access_t*)p_this;
+    stream_t     *p_access = (stream_t*)p_this;
+    access_sys_t *sys;
+
+    if( p_access->b_preparsing )
+        return VLC_EGENERIC;
+
+    sys = vlc_obj_malloc( p_this, sizeof( *sys ) );
+    if( unlikely( sys == NULL ) )
+        return VLC_ENOMEM;
+
+    sys->length = 0;
+    p_access->p_sys = sys;
+    p_access->pf_read = Read;
+    p_access->pf_block = NULL;
+    p_access->pf_control = Control;
+    p_access->pf_seek = NULL;
 
     char *psz_name = strdup( p_access->psz_location );
     char *psz_parser;
     const char *psz_server_addr, *psz_bind_addr = "";
     int  i_bind_port = 1234, i_server_port = 0;
 
-    access_sys_t *sys = malloc( sizeof( *sys ) );
-    if( unlikely( sys == NULL ) )
+    if( unlikely(psz_name == NULL) )
         return VLC_ENOMEM;
-
-    p_access->p_sys = sys;
-
-    /* Set up p_access */
-    access_InitFields( p_access );
-    ACCESS_SET_CALLBACKS( NULL, BlockUDP, Control, NULL );
 
     /* Parse psz_name syntax :
      * [serveraddr[:serverport]][@[bindaddr]:[bindport]] */
@@ -154,27 +210,12 @@ static int Open( vlc_object_t *p_this )
     if( sys->fd == -1 )
     {
         msg_Err( p_access, "cannot open socket" );
-        goto error;
-    }
-
-    sys->fifo = block_FifoNew();
-    if( unlikely( sys->fifo == NULL ) )
-    {
-        net_Close( sys->fd );
-        goto error;
-    }
-
-    sys->fifo_size = var_InheritInteger( p_access, "udp-buffer");
-
-    if( vlc_clone( &sys->thread, ThreadRead, p_access,
-                   VLC_THREAD_PRIORITY_INPUT ) )
-    {
-        block_FifoRelease( sys->fifo );
-        net_Close( sys->fd );
-error:
-        free( sys );
         return VLC_EGENERIC;
     }
+
+    sys->timeout = var_InheritInteger( p_access, "udp-timeout");
+    if( sys->timeout > 0)
+        sys->timeout *= 1000;
 
     return VLC_SUCCESS;
 }
@@ -184,92 +225,26 @@ error:
  *****************************************************************************/
 static void Close( vlc_object_t *p_this )
 {
-    access_t     *p_access = (access_t*)p_this;
+    stream_t     *p_access = (stream_t*)p_this;
     access_sys_t *sys = p_access->p_sys;
 
-    vlc_cancel( sys->thread );
-    vlc_join( sys->thread, NULL );
-    block_FifoRelease( sys->fifo );
     net_Close( sys->fd );
-    free( sys );
 }
 
-/*****************************************************************************
- * Control:
- *****************************************************************************/
-static int Control( access_t *p_access, int i_query, va_list args )
-{
-    bool    *pb_bool;
-    int64_t *pi_64;
+#define TIMEOUT_TEXT N_("UDP Source timeout (sec)")
 
-    switch( i_query )
-    {
-        case ACCESS_CAN_SEEK:
-        case ACCESS_CAN_FASTSEEK:
-        case ACCESS_CAN_PAUSE:
-        case ACCESS_CAN_CONTROL_PACE:
-            pb_bool = (bool*)va_arg( args, bool* );
-            *pb_bool = false;
-            break;
+vlc_module_begin()
+    set_shortname(N_("UDP"))
+    set_description(N_("UDP input"))
+    set_category(CAT_INPUT)
+    set_subcategory(SUBCAT_INPUT_ACCESS)
 
-        case ACCESS_GET_PTS_DELAY:
-            pi_64 = (int64_t*)va_arg( args, int64_t * );
-            *pi_64 = INT64_C(1000)
-                   * var_InheritInteger(p_access, "network-caching");
-            break;
+    add_obsolete_integer("server-port") /* since 2.0.0 */
+    add_obsolete_integer("udp-buffer") /* since 3.0.0 */
+    add_integer("udp-timeout", -1, TIMEOUT_TEXT, NULL, true)
 
-        default:
-            return VLC_EGENERIC;
-    }
-    return VLC_SUCCESS;
-}
+    set_capability("access", 0)
+    add_shortcut("udp", "udpstream", "udp4", "udp6")
 
-/*****************************************************************************
- * BlockUDP:
- *****************************************************************************/
-static block_t *BlockUDP( access_t *p_access )
-{
-    access_sys_t *sys = p_access->p_sys;
-
-    return block_FifoGet( sys->fifo );
-}
-
-/*****************************************************************************
- * ThreadRead: Pull packets from socket as soon as possible.
- *****************************************************************************/
-static void* ThreadRead( void *data )
-{
-    access_t *access = data;
-    access_sys_t *sys = access->p_sys;
-
-    for( ;; )
-    {
-        block_t *pkt;
-        ssize_t len;
-
-        block_FifoPace( sys->fifo, SIZE_MAX, sys->fifo_size );
-
-        pkt = block_Alloc( MTU );
-        if( unlikely( pkt == NULL ) )
-            break;
-
-        block_cleanup_push( pkt );
-        len = net_Read( access, sys->fd, NULL, pkt->p_buffer, MTU, false );
-        vlc_cleanup_pop();
-
-        if( len == -1 )
-        {
-            block_Release( pkt );
-
-            if( errno == EINTR )
-                break;
-            continue;
-        }
-
-        pkt = block_Realloc( pkt, 0, len );
-        block_FifoPut( sys->fifo, pkt );
-    }
-
-    block_FifoWake( sys->fifo );
-    return NULL;
-}
+    set_callbacks(Open, Close)
+vlc_module_end()

@@ -2,7 +2,6 @@
  * ctrl_generic.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -88,7 +87,7 @@ public:
     virtual bool isVisible() const;
 
     /// Get the type of control (custom RTTI)
-    virtual string getType() const { return ""; }
+    virtual std::string getType() const { return ""; }
 
 protected:
     // If pVisible is NULL, the control is always visible

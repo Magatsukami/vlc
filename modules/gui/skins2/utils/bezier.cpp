@@ -2,7 +2,6 @@
  * bezier.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -44,8 +43,8 @@
 #   endif
 #endif
 
-Bezier::Bezier( intf_thread_t *p_intf, const vector<float> &rAbscissas,
-                const vector<float> &rOrdinates, Flag_t flag )
+Bezier::Bezier( intf_thread_t *p_intf, const std::vector<float> &rAbscissas,
+                const std::vector<float> &rOrdinates, Flag_t flag )
     : SkinObject( p_intf )
 {
     // Copy the control points coordinates

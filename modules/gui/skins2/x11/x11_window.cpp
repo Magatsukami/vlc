@@ -2,7 +2,6 @@
  * x11_window.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -38,6 +37,8 @@
 #include <assert.h>
 #include <limits.h>
 
+#include <new>
+
 X11Window::X11Window( intf_thread_t *pIntf, GenericWindow &rWindow,
                       X11Display &rDisplay, bool dragDrop, bool playOnDrop,
                       X11Window *pParentWindow, GenericWindow::WindowType_t type ):
@@ -46,7 +47,7 @@ X11Window::X11Window( intf_thread_t *pIntf, GenericWindow &rWindow,
 {
     XSetWindowAttributes attr;
     unsigned long valuemask;
-    string name_type;
+    std::string name_type;
 
     if( type == GenericWindow::FullscreenWindow )
     {
@@ -113,18 +114,9 @@ X11Window::X11Window( intf_thread_t *pIntf, GenericWindow &rWindow,
     }
 
     // Select events received by the window
-    long event_mask;
-    if( type == GenericWindow::VoutWindow )
-    {
-        event_mask =  ExposureMask|KeyPressMask|
-                      LeaveWindowMask|FocusChangeMask;
-    }
-    else
-    {
-        event_mask =  ExposureMask|KeyPressMask|
+    long event_mask = ExposureMask|KeyPressMask|
                       PointerMotionMask|ButtonPressMask|ButtonReleaseMask|
                       LeaveWindowMask|FocusChangeMask;
-    }
     XSelectInput( XDISPLAY, m_wnd, event_mask );
 
     // Store a pointer on the generic window in a map
@@ -155,7 +147,7 @@ X11Window::X11Window( intf_thread_t *pIntf, GenericWindow &rWindow,
 
         // Register the window as a drop target
         Atom xdndAtom = XInternAtom( XDISPLAY, "XdndAware", False );
-        char xdndVersion = 4;
+        char xdndVersion = 5;
         XChangeProperty( XDISPLAY, m_wnd, xdndAtom, XA_ATOM, 32,
                          PropModeReplace, (unsigned char *)&xdndVersion, 1 );
 
@@ -164,7 +156,7 @@ X11Window::X11Window( intf_thread_t *pIntf, GenericWindow &rWindow,
     }
 
     // Change the window title
-    string name_window = "VLC (" + name_type + ")";
+    std::string name_window = "VLC (" + name_type + ")";
     XStoreName( XDISPLAY, m_wnd, name_window.c_str() );
 
     // Set the WM_TRANSIENT_FOR property
@@ -172,8 +164,9 @@ X11Window::X11Window( intf_thread_t *pIntf, GenericWindow &rWindow,
     {
         // Associate the fsc window to the fullscreen window
         VoutManager* pVoutManager = VoutManager::instance( getIntf() );
-        GenericWindow* pWin = pVoutManager->getVoutMainWindow();
-        Window wnd = (Window) pWin->getOSHandle();
+        GenericWindow* pGenericWin = pVoutManager->getVoutMainWindow();
+        X11Window *pWin = (X11Window*)pGenericWin->getOSWindow();
+        Window wnd = pWin->getDrawable();
         XSetTransientForHint( XDISPLAY, m_wnd, wnd );
     }
     else
@@ -201,7 +194,7 @@ X11Window::X11Window( intf_thread_t *pIntf, GenericWindow &rWindow,
     long host_name_max = sysconf( _SC_HOST_NAME_MAX );
     if( host_name_max <= 0 )
         host_name_max = _POSIX_HOST_NAME_MAX;
-    hostname = new char[host_name_max];
+    hostname = new (std::nothrow) char[host_name_max];
     if( hostname && gethostname( hostname, host_name_max ) == 0 )
     {
         hostname[host_name_max - 1] = '\0';
@@ -221,6 +214,19 @@ X11Window::X11Window( intf_thread_t *pIntf, GenericWindow &rWindow,
     XChangeProperty( XDISPLAY, m_wnd, NET_WM_PID, XA_CARDINAL, 32,
                      PropModeReplace, (unsigned char *)&pid, 1 );
 
+    if( NET_WM_WINDOW_TYPE != None )
+    {
+        if( type == GenericWindow::FullscreenWindow )
+        {
+            // Some Window Managers like Gnome3 limit fullscreen to the
+            // subarea outside the task bar if no window type is provided.
+            // For those WMs, setting type window to normal ensures a clean
+            // 100% fullscreen
+            XChangeProperty( XDISPLAY, m_wnd, NET_WM_WINDOW_TYPE,
+                         XA_ATOM, 32, PropModeReplace,
+                         (unsigned char *)&NET_WM_WINDOW_TYPE_NORMAL, 1 );
+        }
+    }
 }
 
 
@@ -236,11 +242,12 @@ X11Window::~X11Window()
     XSync( XDISPLAY, False );
 }
 
-void X11Window::reparent( uint32_t OSHandle, int x, int y, int w, int h )
+void X11Window::reparent( OSWindow *win, int x, int y, int w, int h )
 {
     // Reparent the window
+    X11Window *parent = (X11Window*)win;
     Window new_parent =
-           OSHandle ? (Window) OSHandle : DefaultRootWindow( XDISPLAY );
+           parent ? parent->m_wnd : DefaultRootWindow( XDISPLAY );
 
     XReparentWindow( XDISPLAY, m_wnd, new_parent, x, y);
     if( w && h )

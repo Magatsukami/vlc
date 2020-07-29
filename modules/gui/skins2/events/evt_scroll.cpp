@@ -2,7 +2,6 @@
  * evt_scroll.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -25,9 +24,9 @@
 #include "evt_scroll.hpp"
 
 
-const string EvtScroll::getAsString() const
+const std::string EvtScroll::getAsString() const
 {
-    string event = "scroll";
+    std::string event = "scroll";
 
     // Add the direction
     if( m_direction == kUp )

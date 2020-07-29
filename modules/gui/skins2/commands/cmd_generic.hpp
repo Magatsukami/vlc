@@ -2,7 +2,6 @@
  * cmd_generic.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -38,7 +37,7 @@ class Cmd##name: public CmdGeneric                             \
     Cmd##name( intf_thread_t *pIntf ): CmdGeneric( pIntf ) { } \
     virtual ~Cmd##name() { }                                   \
     virtual void execute();                                    \
-    virtual string getType() const { return type; }            \
+    virtual std::string getType() const { return type; }       \
 };
 
 
@@ -51,7 +50,7 @@ public:                                                              \
         CmdGeneric( pParent->getIntf() ), m_pParent( pParent ) { }   \
     virtual ~Cmd##action() { }                                       \
     virtual void execute();                                          \
-    virtual string getType() const { return "Cmd" #parent #action; } \
+    virtual std::string getType() const { return "Cmd" #parent #action; } \
 private:                                                             \
     parent *m_pParent;                                               \
 } m_cmd##action;                                                     \
@@ -68,7 +67,7 @@ public:
     virtual void execute() = 0;
 
     /// Return the type of the command
-    virtual string getType() const { return ""; }
+    virtual std::string getType() const { return ""; }
 
     /// During queue reductions, check if we really want to remove
     /// this command.

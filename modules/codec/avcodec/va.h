@@ -2,7 +2,6 @@
  * va.h: Video Acceleration API for avcodec
  *****************************************************************************
  * Copyright (C) 2009 Laurent Aimar
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir_AT_ videolan _DOT_ org>
  *
@@ -24,101 +23,80 @@
 #ifndef VLC_AVCODEC_VA_H
 #define VLC_AVCODEC_VA_H 1
 
+#include "avcommon_compat.h"
+#include <libavutil/pixdesc.h>
+
 typedef struct vlc_va_t vlc_va_t;
 typedef struct vlc_va_sys_t vlc_va_sys_t;
+typedef struct vlc_decoder_device vlc_decoder_device;
+typedef struct vlc_video_context vlc_video_context;
+
+struct vlc_va_operations {
+    int (*get)(vlc_va_t *, picture_t *pic, uint8_t **surface);
+    void (*close)(vlc_va_t *);
+};
 
 struct vlc_va_t {
-    VLC_COMMON_MEMBERS
+    struct vlc_object_t obj;
 
     vlc_va_sys_t *sys;
-    module_t *module;
-    char *description;
-    int pix_fmt;
-
-    int  (*setup)(vlc_va_t *, void **hw, vlc_fourcc_t *output,
-                  int width, int height);
-    int  (*get)(vlc_va_t *, void **opaque, uint8_t **data);
-    void (*release)(void *opaque, uint8_t *surface);
-    int  (*extract)(vlc_va_t *, picture_t *dst, void *opaque, uint8_t *data);
+    const struct vlc_va_operations *ops;
 };
+
+typedef int (*vlc_va_open)(vlc_va_t *, AVCodecContext *,
+                           enum PixelFormat hwfmt, const AVPixFmtDescriptor *,
+                           const es_format_t *, vlc_decoder_device *,
+                           video_format_t *, vlc_video_context **);
+
+#define set_va_callback(activate, priority) \
+    { \
+        vlc_va_open open__ = activate; \
+        (void) open__; \
+        set_callback(activate) \
+    } \
+    set_capability( "hw decoder", priority )
+
+/**
+ * Determines whether the hardware acceleration PixelFormat can be used to
+ * decode pixels similar to the software PixelFormat.
+ * @param hwfmt the hardware acceleration pixel format
+ * @param swfmt the software pixel format
+ * @return true if the hardware acceleration should be supported
+ */
+bool vlc_va_MightDecode(enum PixelFormat hwfmt, enum PixelFormat swfmt);
 
 /**
  * Creates an accelerated video decoding back-end for libavcodec.
  * @param obj parent VLC object
- * @param codec_id libavcodec codec ID of the content to decode
  * @param fmt VLC format of the content to decode
  * @return a new VLC object on success, NULL on error.
  */
-vlc_va_t *vlc_va_New(vlc_object_t *obj, int codec_id, const es_format_t *fmt);
+vlc_va_t *vlc_va_New(vlc_object_t *obj, AVCodecContext *,
+                     enum PixelFormat hwfmt, const AVPixFmtDescriptor *,
+                     const es_format_t *fmt, vlc_decoder_device *device,
+                     video_format_t *, vlc_video_context **vtcx_out);
 
 /**
- * Initializes the acceleration video decoding back-end for libavcodec.
- * @param hw pointer to libavcodec hardware context pointer [OUT]
- * @param output pointer to video chroma output by the back-end [OUT]
- * @param width coded video width in pixels
- * @param height coded video height in pixels
- * @return VLC_SUCCESS on success, otherwise an error code.
- */
-static inline int vlc_va_Setup(vlc_va_t *va, void **hw, vlc_fourcc_t *output,
-                               int width, int height)
-{
-    return va->setup(va, hw, output, width, height);
-}
-
-/**
- * Allocates a hardware video surface for a libavcodec frame.
+ * Get a hardware video surface for a libavcodec frame.
  * The surface will be used as output for the hardware decoder, and possibly
  * also as a reference frame to decode other surfaces.
  *
- * @param opaque pointer to storage space for surface internal data [OUT]
- * @param data pointer to the AVFrame data[0] and data[3] pointers [OUT]
+ * The type of the surface depends on the hardware pixel format:
+ * AV_PIX_FMT_D3D11VA_VLD - ID3D11VideoDecoderOutputView*
+ * AV_PIX_FMT_DXVA2_VLD   - IDirect3DSurface9*
+ * AV_PIX_FMT_VDPAU       - VdpVideoSurface
+ * AV_PIX_FMT_VAAPI_VLD   - VASurfaceID
  *
- * @note This function needs not be reentrant. However it may be called
- * concurrently with vlc_va_Extract() and/or vlc_va_Release() from other
- * threads and other frames.
+ * @param pic pointer to VLC picture containing the surface [IN/OUT]
+ * @param surface pointer to the AVFrame data[0] and data[3] pointers [OUT]
  *
- * @param frame libavcodec frame [IN/OUT]
+ * @note This function needs not be reentrant.
+ *
  * @return VLC_SUCCESS on success, otherwise an error code.
  */
-static inline int vlc_va_Get(vlc_va_t *va, void **opaque, uint8_t **data)
+static inline int vlc_va_Get(vlc_va_t *va, picture_t *pic, uint8_t **surface)
 {
-    return va->get(va, opaque, data);
-}
-
-/**
- * Releases a hardware surface from a libavcodec frame.
- * The surface has been previously allocated with vlc_va_Get().
- *
- * @param opaque opaque data pointer of the AVFrame set by vlc_va_Get()
- * @param data data[0] pointer of the AVFrame set by vlc_va_Get()
- *
- * @note This function needs not be reentrant. However it may be called
- * concurrently with vlc_va_Get() and/or vlc_va_Extract() from other threads
- * and other frames.
- *
- * @param frame libavcodec frame previously allocated by vlc_va_Get()
- */
-static inline void vlc_va_Release(vlc_va_t *va, void *opaque, uint8_t *data)
-{
-    va->release(opaque, data);
-}
-
-/**
- * Extracts a hardware surface from a libavcodec frame into a VLC picture.
- * The surface has been previously allocated with vlc_va_Get() and decoded
- * by the libavcodec hardware acceleration.
- * The surface may still be used by libavcodec as a reference frame until it is
- * freed with vlc_va_Release().
- *
- * @note This function needs not be reentrant, but it may run concurrently with
- * vlc_va_Get() or vlc_va_Release() in other threads (with distinct frames).
- *
- * @param frame libavcodec frame previously allocated by vlc_va_Get()
- */
-static inline int vlc_va_Extract(vlc_va_t *va, picture_t *dst, void *opaque,
-                                 uint8_t *data)
-{
-    return va->extract(va, dst, opaque, data);
+    return va->ops->get(va, pic, surface);
 }
 
 /**

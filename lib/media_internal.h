@@ -3,7 +3,6 @@
  * Also contains some internal utility functions
  *****************************************************************************
  * Copyright (C) 2005-2009 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Clément Stenac <zorglub@videolan.org>
  *
@@ -30,10 +29,12 @@
 
 #include <vlc_common.h>
 #include <vlc_input.h>
+#include <vlc_player.h>
+#include <vlc_atomic.h>
 
 struct libvlc_media_t
 {
-    libvlc_event_manager_t * p_event_manager;
+    libvlc_event_manager_t event_manager;
     input_item_t      *p_input_item;
     int                i_refcount;
     libvlc_instance_t *p_libvlc_instance;
@@ -43,7 +44,9 @@ struct libvlc_media_t
 
     vlc_cond_t parsed_cond;
     vlc_mutex_t parsed_lock;
+    vlc_mutex_t subitems_lock;
 
+    libvlc_media_parsed_status_t parsed_status;
     bool is_parsed;
     bool has_asked_preparse;
 };
@@ -53,5 +56,60 @@ libvlc_media_t * libvlc_media_new_from_input_item(
         libvlc_instance_t *, input_item_t * );
 
 void libvlc_media_set_state( libvlc_media_t *, libvlc_state_t );
+void libvlc_media_add_subtree(libvlc_media_t *, input_item_node_t *);
+
+static inline enum es_format_category_e
+libvlc_track_type_to_escat( libvlc_track_type_t i_type )
+{
+    switch( i_type )
+    {
+        case libvlc_track_audio:
+            return AUDIO_ES;
+        case libvlc_track_video:
+            return VIDEO_ES;
+        case libvlc_track_text:
+            return SPU_ES;
+        case libvlc_track_unknown:
+        default:
+            return UNKNOWN_ES;
+    }
+}
+
+typedef struct libvlc_media_trackpriv_t
+{
+    libvlc_media_track_t t;
+    union {
+        libvlc_audio_track_t audio;
+        libvlc_video_track_t video;
+        libvlc_subtitle_track_t subtitle;
+    };
+    vlc_es_id_t *es_id;
+    vlc_atomic_rc_t rc;
+} libvlc_media_trackpriv_t;
+
+static inline const libvlc_media_trackpriv_t *
+libvlc_media_track_to_priv( const libvlc_media_track_t *track )
+{
+    return container_of( track, const libvlc_media_trackpriv_t, t );
+}
+
+void
+libvlc_media_trackpriv_from_es( libvlc_media_trackpriv_t *trackpriv,
+                                const es_format_t *es  );
+
+libvlc_media_track_t *
+libvlc_media_track_create_from_player_track( const struct vlc_player_track *track );
+
+libvlc_media_tracklist_t *
+libvlc_media_tracklist_from_es_array( es_format_t **es_array,
+                                      size_t es_count,
+                                      libvlc_track_type_t type );
+
+libvlc_media_tracklist_t *
+libvlc_media_tracklist_from_player( vlc_player_t *player,
+                                    libvlc_track_type_t type );
+
+void
+libvlc_media_track_clean( libvlc_media_track_t *track );
 
 #endif

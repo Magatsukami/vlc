@@ -2,7 +2,6 @@
  * mmstu.c: MMS access plug-in
  *****************************************************************************
  * Copyright (C) 2001, 2002 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir@via.ecp.fr>
  *
@@ -37,12 +36,15 @@
 
 #include <sys/types.h>
 #include <unistd.h>
-#ifdef HAVE_POLL
+#ifdef HAVE_POLL_H
 #   include <poll.h>
 #endif
 
+#include <vlc_charset.h>
 #include <vlc_network.h>
 #include <vlc_url.h>
+#include <vlc_interrupt.h>
+#include <vlc_es.h>
 #include "asf.h"
 #include "buffer.h"
 
@@ -59,38 +61,37 @@
 /*****************************************************************************
  * Local prototypes
  *****************************************************************************/
-int   MMSTUOpen   ( access_t * );
-void  MMSTUClose  ( access_t * );
+int   MMSTUOpen   ( stream_t * );
+void  MMSTUClose  ( stream_t * );
 
 
-static block_t *Block( access_t * );
-static int Seek( access_t *, uint64_t );
-static int Control( access_t *, int, va_list );
+static block_t *Block( stream_t *, bool * );
+static int Seek( stream_t *, uint64_t );
+static int Control( stream_t *, int, va_list );
 
-static int  MMSOpen ( access_t *, vlc_url_t *, int );
-static int  MMSStart( access_t *, uint32_t );
-static int  MMSStop ( access_t * );
-static void MMSClose( access_t * );
+static int  MMSOpen ( stream_t *, vlc_url_t *, int );
+static int  MMSStart( stream_t *, uint32_t );
+static int  MMSStop ( stream_t * );
+static void MMSClose( stream_t * );
 
 
-static int  mms_CommandRead( access_t *p_access, int i_command1, int i_command2 );
-static int  mms_CommandSend( access_t *, int, uint32_t, uint32_t, uint8_t *, int );
+static int  mms_CommandRead( stream_t *p_access, int i_command1, int i_command2 );
+static int  mms_CommandSend( stream_t *, int, uint32_t, uint32_t, uint8_t *, int );
 
-static int  mms_HeaderMediaRead( access_t *, int );
+static int  mms_HeaderMediaRead( stream_t *, int );
 
-static int  mms_ReceivePacket( access_t * );
+static int  mms_ReceivePacket( stream_t * );
 
-static void KeepAliveStart( access_t * );
-static void KeepAliveStop( access_t * );
+static void KeepAliveStart( stream_t * );
+static void KeepAliveStop( stream_t * );
 
-int  MMSTUOpen( access_t *p_access )
+int  MMSTUOpen( stream_t *p_access )
 {
     access_sys_t   *p_sys;
     int             i_proto;
     int             i_status;
 
     /* Set up p_access */
-    access_InitFields( p_access );
     p_access->pf_read = NULL;
     p_access->pf_block = Block;
     p_access->pf_control = Control;
@@ -104,12 +105,11 @@ int  MMSTUOpen( access_t *p_access )
     vlc_mutex_init( &p_sys->lock_netwrite );
 
     /* *** Parse URL and get server addr/port and path *** */
-    vlc_UrlParse( &p_sys->url, p_access->psz_location, 0 );
+    vlc_UrlParse( &p_sys->url, p_access->psz_url );
     if( p_sys->url.psz_host == NULL || *p_sys->url.psz_host == '\0' )
     {
         msg_Err( p_access, "invalid server name" );
         vlc_UrlClean( &p_sys->url );
-        vlc_mutex_destroy( &p_sys->lock_netwrite );
         free( p_sys );
         return VLC_EGENERIC;
     }
@@ -121,26 +121,21 @@ int  MMSTUOpen( access_t *p_access )
     /* *** connect to this server *** */
     /* look at  requested protocol (udp/tcp) */
     i_proto = MMS_PROTO_AUTO;
-    if( *p_access->psz_access )
+    if( !strncmp( p_access->psz_name, "mmsu", 4 ) )
     {
-        if( !strncmp( p_access->psz_access, "mmsu", 4 ) )
-        {
-            i_proto = MMS_PROTO_UDP;
-        }
-        else if( !strncmp( p_access->psz_access, "mmst", 4 ) )
-        {
-            i_proto = MMS_PROTO_TCP;
-        }
+        i_proto = MMS_PROTO_UDP;
+    }
+    else if( !strncmp( p_access->psz_name, "mmst", 4 ) )
+    {
+        i_proto = MMS_PROTO_TCP;
     }
 
     /* connect */
     if( i_proto == MMS_PROTO_AUTO )
     {   /* first try with TCP and then UDP*/
-        if( ( i_status = MMSOpen( p_access, &p_sys->url, MMS_PROTO_TCP ) ) )
-        {
-            if( vlc_object_alive(p_access) )
-                i_status = MMSOpen( p_access, &p_sys->url, MMS_PROTO_UDP );
-        }
+        i_status = MMSOpen( p_access, &p_sys->url, MMS_PROTO_TCP );
+        if( i_status )
+            i_status = MMSOpen( p_access, &p_sys->url, MMS_PROTO_UDP );
     }
     else
     {
@@ -151,7 +146,6 @@ int  MMSTUOpen( access_t *p_access )
     {
         msg_Err( p_access, "cannot connect to server" );
         vlc_UrlClean( &p_sys->url );
-        vlc_mutex_destroy( &p_sys->lock_netwrite );
         free( p_sys );
         return VLC_EGENERIC;
     }
@@ -194,7 +188,7 @@ int  MMSTUOpen( access_t *p_access )
 /*****************************************************************************
  * Close: free unused data structures
  *****************************************************************************/
-void MMSTUClose( access_t *p_access )
+void MMSTUClose( stream_t *p_access )
 {
     access_sys_t *p_sys = p_access->p_sys;
 
@@ -212,33 +206,32 @@ void MMSTUClose( access_t *p_access )
 /*****************************************************************************
  * Control:
  *****************************************************************************/
-static int Control( access_t *p_access, int i_query, va_list args )
+static int Control( stream_t *p_access, int i_query, va_list args )
 {
     access_sys_t *p_sys = p_access->p_sys;
     bool   *pb_bool;
     bool    b_bool;
-    int64_t      *pi_64;
     int           i_int;
 
     switch( i_query )
     {
-        case ACCESS_CAN_SEEK:
-            pb_bool = (bool*)va_arg( args, bool* );
+        case STREAM_CAN_SEEK:
+            pb_bool = va_arg( args, bool * );
             *pb_bool = p_sys->b_seekable;
             break;
 
-        case ACCESS_CAN_FASTSEEK:
-            pb_bool = (bool*)va_arg( args, bool* );
+        case STREAM_CAN_FASTSEEK:
+            pb_bool = va_arg( args, bool * );
             *pb_bool = false;
             break;
 
-        case ACCESS_CAN_PAUSE:
-            pb_bool = (bool*)va_arg( args, bool* );
+        case STREAM_CAN_PAUSE:
+            pb_bool = va_arg( args, bool * );
             *pb_bool = true;
             break;
 
-        case ACCESS_CAN_CONTROL_PACE:
-            pb_bool = (bool*)va_arg( args, bool* );
+        case STREAM_CAN_CONTROL_PACE:
+            pb_bool = va_arg( args, bool * );
 
 #if 0       /* Disable for now until we have a clock synchro algo
              * which works with something else than MPEG over UDP */
@@ -247,26 +240,64 @@ static int Control( access_t *p_access, int i_query, va_list args )
             *pb_bool = true;
             break;
 
-        case ACCESS_GET_SIZE:
+        case STREAM_GET_SIZE:
+            if( !p_sys->b_seekable )
+                return VLC_EGENERIC;
             *va_arg( args, uint64_t * ) = p_sys->i_size;
             break;
 
-        case ACCESS_GET_PTS_DELAY:
-            pi_64 = (int64_t*)va_arg( args, int64_t * );
-            *pi_64 = INT64_C(1000)
-                   * var_InheritInteger( p_access, "network-caching" );
+        case STREAM_GET_PTS_DELAY:
+            *va_arg( args, vlc_tick_t * ) =
+                VLC_TICK_FROM_MS(var_InheritInteger( p_access, "network-caching" ));
             break;
 
-        case ACCESS_GET_PRIVATE_ID_STATE:
-            i_int = (int)va_arg( args, int );
-            pb_bool = (bool *)va_arg( args, bool * );
+        case STREAM_GET_PRIVATE_ID_STATE:
+            i_int = va_arg( args, int );
+            pb_bool = va_arg( args, bool * );
 
             if( i_int < 0 || i_int > 127 )
                 return VLC_EGENERIC;
             *pb_bool =  p_sys->asfh.stream[i_int].i_selected ? true : false;
             break;
 
-        case ACCESS_SET_PAUSE_STATE:
+        case STREAM_SET_PRIVATE_ID_STATE:
+        {
+            i_int = va_arg( args, int );
+            b_bool = (bool)va_arg( args, int );
+            int i_cat;
+            if( i_int > 127 )
+                return VLC_EGENERIC;
+            else if ( i_int < 0 )
+            {
+                /* Deselecting all ES in this category */
+                assert( !b_bool );
+                i_cat = -1 * i_int;
+                if ( i_cat > ES_CATEGORY_COUNT )
+                    return VLC_EGENERIC;
+            }
+            else
+            {
+                /* Chose another ES */
+                assert( b_bool );
+                i_cat = p_sys->asfh.stream[i_int].i_cat;
+            }
+
+            for ( int i=0; i< 128; i++ )
+            {
+                /* First unselect all streams from the same cat */
+                if ( i_cat == p_sys->asfh.stream[i].i_cat )
+                    p_sys->asfh.stream[i].i_selected = false;
+            }
+
+            if ( i_int > 0 )
+                p_sys->asfh.stream[i_int].i_selected = true;
+
+            MMSStop( p_access );
+            Seek( p_access, p_sys->i_position );
+            return VLC_SUCCESS;
+        }
+
+        case STREAM_SET_PAUSE_STATE:
             b_bool = (bool)va_arg( args, int );
             if( b_bool )
             {
@@ -276,7 +307,7 @@ static int Control( access_t *p_access, int i_query, va_list args )
             else
             {
                 KeepAliveStop( p_access );
-                Seek( p_access, p_access->info.i_pos );
+                Seek( p_access, p_sys->i_position );
             }
             break;
 
@@ -289,7 +320,7 @@ static int Control( access_t *p_access, int i_query, va_list args )
 /*****************************************************************************
  * Seek: try to go at the right place
  *****************************************************************************/
-static int Seek( access_t * p_access, uint64_t i_pos )
+static int Seek( stream_t * p_access, uint64_t i_pos )
 {
     access_sys_t *p_sys = p_access->p_sys;
     uint32_t    i_packet;
@@ -298,11 +329,11 @@ static int Seek( access_t * p_access, uint64_t i_pos )
 
     if( i_pos < p_sys->i_header)
     {
-        if( p_access->info.i_pos < p_sys->i_header )
+        if( p_sys->i_position < p_sys->i_header )
         {
             /* no need to restart stream, it was already one
              * or no stream was yet read */
-            p_access->info.i_pos = i_pos;
+            p_sys->i_position = i_pos;
             return VLC_SUCCESS;
         }
         else
@@ -341,11 +372,11 @@ static int Seek( access_t * p_access, uint64_t i_pos )
     var_buffer_free( &buffer );
 
 
-    while( vlc_object_alive (p_access) )
+    for( ;; )
     {
         if( mms_HeaderMediaRead( p_access, MMS_PACKET_CMD ) < 0 )
         {
-            p_access->info.b_eof = true;
+            p_sys->b_eof = true;
             return VLC_EGENERIC;
         }
 
@@ -356,11 +387,11 @@ static int Seek( access_t * p_access, uint64_t i_pos )
         }
     }
 
-    while( vlc_object_alive (p_access) )
+    for( ;; )
     {
         if( mms_HeaderMediaRead( p_access, MMS_PACKET_CMD ) < 0 )
         {
-            p_access->info.b_eof = true;
+            p_sys->b_eof = true;
             return VLC_EGENERIC;
         }
         if( p_sys->i_command == 0x05 )
@@ -373,15 +404,14 @@ static int Seek( access_t * p_access, uint64_t i_pos )
     /* get a packet */
     if( mms_HeaderMediaRead( p_access, MMS_PACKET_MEDIA ) < 0 )
     {
-        p_access->info.b_eof = true;
+        p_sys->b_eof = true;
         return VLC_EGENERIC;
     }
 
     msg_Dbg( p_access, "Streaming restarted" );
 
     p_sys->i_media_used += i_offset;
-    p_access->info.i_pos = i_pos;
-    p_access->info.b_eof = false;
+    p_sys->i_position = i_pos;
 
     return VLC_SUCCESS;
 }
@@ -389,23 +419,26 @@ static int Seek( access_t * p_access, uint64_t i_pos )
 /*****************************************************************************
  * Block:
  *****************************************************************************/
-static block_t *Block( access_t *p_access )
+static block_t *Block( stream_t *p_access, bool *restrict eof )
 {
     access_sys_t *p_sys = p_access->p_sys;
 
-    if( p_access->info.b_eof )
-        return NULL;
-
-    if( p_access->info.i_pos < p_sys->i_header )
+    if( p_sys->b_eof )
     {
-        const size_t i_copy = p_sys->i_header - p_access->info.i_pos;
+        *eof = true;
+        return NULL;
+    }
+
+    if( p_sys->i_position < p_sys->i_header )
+    {
+        const size_t i_copy = p_sys->i_header - p_sys->i_position;
 
         block_t *p_block = block_Alloc( i_copy );
         if( !p_block )
             return NULL;
 
-        memcpy( p_block->p_buffer, &p_sys->p_header[p_access->info.i_pos], i_copy );
-        p_access->info.i_pos += i_copy;
+        memcpy( p_block->p_buffer, &p_sys->p_header[p_sys->i_position], i_copy );
+        p_sys->i_position += i_copy;
         return p_block;
     }
     else if( p_sys->p_media && p_sys->i_media_used < __MAX( p_sys->i_media, p_sys->i_packet_length ) )
@@ -428,7 +461,7 @@ static block_t *Block( access_t *p_access )
             memset( &p_block->p_buffer[i_copy], 0, i_padding );
 
         p_sys->i_media_used += i_copy + i_padding;
-        p_access->info.i_pos += i_copy + i_padding;
+        p_sys->i_position += i_copy + i_padding;
         return p_block;
     }
 
@@ -439,19 +472,19 @@ static block_t *Block( access_t *p_access )
 /****************************************************************************
  * MMSOpen : Open a connection with the server over mmst or mmsu
  ****************************************************************************/
-static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
+static int MMSOpen( stream_t  *p_access, vlc_url_t *p_url, int  i_proto )
 {
     access_sys_t *p_sys = p_access->p_sys;
     int           b_udp = ( i_proto == MMS_PROTO_UDP ) ? 1 : 0;
 
     var_buffer_t buffer;
     char         *tmp;
-    uint16_t     *p;
-    int          i_server_version;
-    int          i_tool_version;
-    int          i_update_player_url;
-    int          i_encryption_type;
-    int          i;
+    const uint8_t *p;
+    const uint8_t *p_cmdend;
+    uint32_t     i_server_version;
+    uint32_t     i_tool_version;
+    uint32_t     i_update_player_url;
+    uint32_t     i_encryption_type;
     int          i_streams;
     int          i_first;
     char         *mediapath;
@@ -459,7 +492,7 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
 
     /* *** Open a TCP connection with server *** */
     msg_Dbg( p_access, "waiting for connection..." );
-    p_sys->i_handle_tcp = net_ConnectTCP( p_access, p_url->psz_host, p_url->i_port );
+    p_sys->i_handle_tcp = net_Connect( p_access, p_url->psz_host, p_url->i_port, SOCK_STREAM, 0 );
     if( p_sys->i_handle_tcp < 0 )
     {
         msg_Err( p_access, "failed to open a connection (tcp)" );
@@ -510,12 +543,12 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
     p_sys->i_media = 0;
     p_sys->i_media_used = 0;
 
-    p_access->info.i_pos = 0;
+    p_sys->i_position = 0;
     p_sys->i_buffer_tcp = 0;
     p_sys->i_buffer_udp = 0;
     p_sys->p_cmd = NULL;
     p_sys->i_cmd = 0;
-    p_access->info.b_eof = false;
+    p_sys->b_eof = false;
 
     /* *** send command 1 : connection request *** */
     var_buffer_initwrite( &buffer, 0 );
@@ -541,7 +574,7 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
                      buffer.p_data,
                      buffer.i_data );
 
-    if( mms_CommandRead( p_access, 0x01, 0 ) < 0 )
+    if( mms_CommandRead( p_access, 0x01, 0 ) < 0 || p_sys->i_cmd < MMS_CMD_HEADERSIZE + 48 )
     {
         var_buffer_free( &buffer );
         MMSClose( p_access );
@@ -552,29 +585,32 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
     i_tool_version = GetDWLE( p_sys->p_cmd + MMS_CMD_HEADERSIZE + 36 );
     i_update_player_url = GetDWLE( p_sys->p_cmd + MMS_CMD_HEADERSIZE + 40 );
     i_encryption_type = GetDWLE( p_sys->p_cmd + MMS_CMD_HEADERSIZE + 44 );
-    p = (uint16_t*)( p_sys->p_cmd + MMS_CMD_HEADERSIZE + 48 );
-#define GETUTF16( psz, size ) \
+    p = p_sys->p_cmd + MMS_CMD_HEADERSIZE + 48;
+    p_cmdend = &p_sys->p_cmd[p_sys->i_cmd];
+
+#define GETUTF16( fmt, size ) \
+do \
+{ \
+    if( (p_cmdend - p) / 2u < (size) ) \
+    {\
+        var_buffer_free( &buffer );\
+        MMSClose( p_access );\
+        return VLC_EBADVAR;\
+    }\
+    char *str = FromCharset( "UTF-16LE", p, (size) * 2 ); \
+    p += (size) * 2; \
+    if( str != NULL ) \
     { \
-        int i; \
-        psz = xmalloc( size + 1); \
-        for( i = 0; i < size; i++ ) \
-        { \
-            psz[i] = p[i]; \
-        } \
-        psz[size] = '\0'; \
-        p += ( size ); \
-    }
-    GETUTF16( p_sys->psz_server_version, i_server_version );
-    GETUTF16( p_sys->psz_tool_version, i_tool_version );
-    GETUTF16( p_sys->psz_update_player_url, i_update_player_url );
-    GETUTF16( p_sys->psz_encryption_type, i_encryption_type );
+        msg_Dbg( p_access, fmt " %s", str ); \
+        free( str ); \
+    } \
+} while (0)
+
+    GETUTF16( "server version:   ", i_server_version );
+    GETUTF16( "tool version:     ", i_tool_version );
+    GETUTF16( "update player URL:", i_update_player_url );
+    GETUTF16( "encryption type:  ", i_encryption_type );
 #undef GETUTF16
-    msg_Dbg( p_access,
-             "0x01 --> server_version:\"%s\" tool_version:\"%s\" update_player_url:\"%s\" encryption_type:\"%s\"",
-             p_sys->psz_server_version,
-             p_sys->psz_tool_version,
-             p_sys->psz_update_player_url,
-             p_sys->psz_encryption_type );
 
     /* *** should make an 18 command to make data timing *** */
 
@@ -627,7 +663,7 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
     }
     else if( p_sys->i_command != 0x02 )
     {
-        msg_Warn( p_access, "received command isn't 0x02 in reponse to 0x02" );
+        msg_Warn( p_access, "received command isn't 0x02 in response to 0x02" );
     }
 
     /* *** send command 5 : media file name/path requested *** */
@@ -649,7 +685,7 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
                      buffer.p_data,
                      buffer.i_data );
 
-    /* *** wait for reponse *** */
+    /* *** wait for response *** */
     mms_CommandRead( p_access, 0x1a, 0x06 );
 
     /* test if server send 0x1A answer */
@@ -669,6 +705,13 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
         var_buffer_free( &buffer );
         MMSClose( p_access );
         return( -1 );
+    }
+
+    if( p_sys->i_cmd < MMS_CMD_HEADERSIZE + 64 )
+    {
+        var_buffer_free( &buffer );
+        MMSClose( p_access );
+        return VLC_EBADVAR;
     }
 
     /*  1 for file ok, 2 for authen ok */
@@ -704,7 +747,7 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
 
     msg_Dbg( p_access,
              "answer 0x06 flags:0x%8.8"PRIx32" media_length:%"PRIu32"s "
-             "packet_length:%zu packet_count:%"PRIu32" max_bit_rate:%d "
+             "packet_length:%zu packet_count:%"PRIu32" max_bit_rate:%"PRIu32
              "header_size:%zu",
              p_sys->i_flags_broadcast,
              p_sys->i_media_length,
@@ -728,7 +771,7 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
     mms_CommandSend( p_access, 0x15, p_sys->i_command_level, 0x00,
                      buffer.p_data, buffer.i_data );
 
-    /* *** wait for reponse *** */
+    /* *** wait for response *** */
     /* Commented out because it fails on some stream (no 0x11 answer) */
 #if 0
     mms_CommandRead( p_access, 0x11, 0 );
@@ -788,7 +831,7 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
     i_first = -1;
     var_buffer_reinitwrite( &buffer, 0 );
     /* for now, select first audio and video stream */
-    for( i = 1; i < 128; i++ )
+    for( int i = 1; i < 128; i++ )
     {
 
         if( p_sys->asfh.stream[i].i_cat != ASF_CODEC_TYPE_UNKNOWN )
@@ -861,7 +904,7 @@ static int MMSOpen( access_t  *p_access, vlc_url_t *p_url, int  i_proto )
 /****************************************************************************
  * MMSStart : Start streaming
  ****************************************************************************/
-static int MMSStart( access_t  *p_access, uint32_t i_packet )
+static int MMSStart( stream_t  *p_access, uint32_t i_packet )
 {
     access_sys_t        *p_sys = p_access->p_sys;
     var_buffer_t    buffer;
@@ -904,7 +947,7 @@ static int MMSStart( access_t  *p_access, uint32_t i_packet )
 /****************************************************************************
  * MMSStop : Stop streaming
  ****************************************************************************/
-static int MMSStop( access_t  *p_access )
+static int MMSStop( stream_t  *p_access )
 {
     access_sys_t *p_sys = p_access->p_sys;
 
@@ -920,7 +963,7 @@ static int MMSStop( access_t  *p_access )
 /****************************************************************************
  * MMSClose : Close streaming and connection
  ****************************************************************************/
-static void MMSClose( access_t  *p_access )
+static void MMSClose( stream_t  *p_access )
 {
     access_sys_t        *p_sys = p_access->p_sys;
 
@@ -943,11 +986,7 @@ static void MMSClose( access_t  *p_access )
     FREENULL( p_sys->p_cmd );
     FREENULL( p_sys->p_media );
     FREENULL( p_sys->p_header );
-
-    FREENULL( p_sys->psz_server_version );
-    FREENULL( p_sys->psz_tool_version );
-    FREENULL( p_sys->psz_update_player_url );
-    FREENULL( p_sys->psz_encryption_type );
+    p_sys->i_header = 0;
 }
 
 /****************************************************************************
@@ -955,7 +994,7 @@ static void MMSClose( access_t  *p_access )
  * MMS specific functions
  *
  ****************************************************************************/
-static int mms_CommandSend( access_t *p_access, int i_command,
+static int mms_CommandSend( stream_t *p_access, int i_command,
                             uint32_t i_prefix1, uint32_t i_prefix2,
                             uint8_t *p_data, int i_data_old )
 {
@@ -994,7 +1033,7 @@ static int mms_CommandSend( access_t *p_access, int i_command,
 
     /* send it */
     vlc_mutex_lock( &p_sys->lock_netwrite );
-    i_ret = net_Write( p_access, p_sys->i_handle_tcp, NULL, buffer.p_data,
+    i_ret = net_Write( p_access, p_sys->i_handle_tcp, buffer.p_data,
                        buffer.i_data - ( 8 - ( i_data - i_data_old ) ) );
     vlc_mutex_unlock( &p_sys->lock_netwrite );
 
@@ -1009,17 +1048,16 @@ static int mms_CommandSend( access_t *p_access, int i_command,
     return VLC_SUCCESS;
 }
 
-static int NetFillBuffer( access_t *p_access )
+static int NetFillBuffer( stream_t *p_access )
 {
     access_sys_t    *p_sys = p_access->p_sys;
     int             i_ret;
     struct pollfd   ufd[2];
-    unsigned        timeout, nfd;
+    unsigned        timeout = p_sys->i_timeout, nfd = 0;
 
     /* FIXME when using udp */
     ssize_t i_tcp, i_udp;
     ssize_t i_tcp_read, i_udp_read;
-    int i_try = 0;
 
     i_tcp = MMS_BUFFER_SIZE/2 - p_sys->i_buffer_tcp;
 
@@ -1042,49 +1080,38 @@ static int NetFillBuffer( access_t *p_access )
         /* msg_Warn( p_access, "ask for tcp:%d udp:%d", i_tcp, i_udp ); */
     }
 
+    /* Initialize file descriptor set */
+    if( i_tcp > 0 )
+    {
+        ufd[nfd].fd = p_sys->i_handle_tcp;
+        ufd[nfd].events = POLLIN;
+        nfd++;
+    }
+    if( i_udp > 0 )
+    {
+        ufd[nfd].fd = p_sys->i_handle_udp;
+        ufd[nfd].events = POLLIN;
+        nfd++;
+    }
+
     /* Find if some data is available */
+    if( p_sys->i_buffer_tcp > 0 || p_sys->i_buffer_udp > 0 )
+        timeout = 2000;
+
     do
     {
-        i_try++;
-
-        /* Initialize file descriptor set */
-        memset (ufd, 0, sizeof (ufd));
-        nfd = 0;
-
-        if( i_tcp > 0 )
-        {
-            ufd[nfd].fd = p_sys->i_handle_tcp;
-            ufd[nfd].events = POLLIN;
-            nfd++;
-        }
-        if( i_udp > 0 )
-        {
-            ufd[nfd].fd = p_sys->i_handle_udp;
-            ufd[nfd].events = POLLIN;
-            nfd++;
-        }
-
-        /* We'll wait 0.5 second if nothing happens */
-        timeout = __MIN( 500, p_sys->i_timeout );
-
-        if( i_try * timeout > p_sys->i_timeout )
-        {
-            msg_Err(p_access, "no data received");
-            return -1;
-        }
-
-        if( i_try > 3 && (p_sys->i_buffer_tcp > 0 || p_sys->i_buffer_udp > 0) )
-        {
-            return -1;
-        }
-
-        if( !vlc_object_alive (p_access) )
+        if( vlc_killed() )
             return -1;
 
-        //msg_Dbg( p_access, "NetFillBuffer: trying again (select)" );
+        i_ret = vlc_poll_i11e(ufd, nfd, timeout);
+    }
+    while( i_ret < 0 && errno == EINTR ); /* FIXME: recompute timeout */
 
-    } while( !(i_ret = poll( ufd, nfd, timeout)) ||
-             (i_ret < 0 && errno == EINTR) );
+    if( i_ret == 0 )
+    {
+        msg_Err(p_access, "no data received");
+        return -1;
+    }
 
     if( i_ret < 0 )
     {
@@ -1123,16 +1150,16 @@ static int NetFillBuffer( access_t *p_access )
     }
 #endif
 
-    if( i_tcp_read > 0 ) p_sys->i_buffer_tcp += i_tcp_read;
-    if( i_udp_read > 0 ) p_sys->i_buffer_udp += i_udp_read;
+    if( i_tcp_read > 0 ) p_sys->i_buffer_tcp += (size_t) i_tcp_read;
+    if( i_udp_read > 0 ) p_sys->i_buffer_udp += (size_t) i_udp_read;
 
     return i_tcp_read + i_udp_read;
 }
 
-static int  mms_ParseCommand( access_t *p_access,
+static int  mms_ParseCommand( stream_t *p_access,
                               uint8_t *p_data,
                               size_t i_data,
-                              int *pi_used )
+                              size_t *pi_used )
 {
  #define GET32( i_pos ) \
     ( p_sys->p_cmd[i_pos] + ( p_sys->p_cmd[i_pos +1] << 8 ) + \
@@ -1144,11 +1171,18 @@ static int  mms_ParseCommand( access_t *p_access,
     uint32_t    i_id;
 
     free( p_sys->p_cmd );
-    p_sys->i_cmd = i_data;
-    p_sys->p_cmd = xmalloc( i_data );
-    memcpy( p_sys->p_cmd, p_data, i_data );
-
-    *pi_used = i_data; /* by default */
+    if( (p_sys->p_cmd = malloc( i_data )) )
+    {
+        p_sys->i_cmd = i_data;
+        memcpy( p_sys->p_cmd, p_data, i_data );
+        *pi_used = i_data; /* by default */
+    }
+    else
+    {
+        *pi_used = p_sys->i_cmd = 0;
+        p_sys->i_command = 0;
+        return -1;
+    }
 
     if( i_data < MMS_CMD_HEADERSIZE )
     {
@@ -1202,9 +1236,9 @@ static int  mms_ParseCommand( access_t *p_access,
     return MMS_PACKET_CMD;
 }
 
-static int  mms_ParsePacket( access_t *p_access,
+static int  mms_ParsePacket( stream_t *p_access,
                              uint8_t *p_data, size_t i_data,
-                             int *pi_used )
+                             size_t *pi_used )
 {
     access_sys_t        *p_sys = p_access->p_sys;
     int i_packet_seq_num;
@@ -1266,22 +1300,15 @@ static int  mms_ParsePacket( access_t *p_access,
 
     if( i_packet_id == p_sys->i_header_packet_id_type )
     {
-        if( p_sys->p_header )
-        {
-            p_sys->p_header = xrealloc( p_sys->p_header,
-                                      p_sys->i_header + i_packet_length - 8 );
-            memcpy( &p_sys->p_header[p_sys->i_header],
-                    p_data + 8, i_packet_length - 8 );
-            p_sys->i_header += i_packet_length - 8;
+        uint8_t *p_reaced = realloc( p_sys->p_header,
+                                     p_sys->i_header + i_packet_length - 8 );
+        if( !p_reaced )
+            return VLC_ENOMEM;
 
-        }
-        else
-        {
-            uint8_t* p_packet = xmalloc( i_packet_length - 8 ); // don't bother with preheader
-            memcpy( p_packet, p_data + 8, i_packet_length - 8 );
-            p_sys->p_header = p_packet;
-            p_sys->i_header = i_packet_length - 8;
-        }
+        memcpy( &p_reaced[p_sys->i_header], p_data + 8, i_packet_length - 8 );
+        p_sys->p_header = p_reaced;
+        p_sys->i_header += i_packet_length - 8;
+
 /*        msg_Dbg( p_access,
                  "receive header packet (%d bytes)",
                  i_packet_length - 8 ); */
@@ -1290,12 +1317,16 @@ static int  mms_ParsePacket( access_t *p_access,
     }
     else
     {
-        uint8_t* p_packet = xmalloc( i_packet_length - 8 ); // don't bother with preheader
-        memcpy( p_packet, p_data + 8, i_packet_length - 8 );
-        FREENULL( p_sys->p_media );
-        p_sys->p_media = p_packet;
-        p_sys->i_media = i_packet_length - 8;
+        free( p_sys->p_media );
+        p_sys->i_media = 0;
         p_sys->i_media_used = 0;
+
+        p_sys->p_media = malloc( i_packet_length - 8 ); // don't bother with preheader
+        if( !p_sys->p_media )
+            return VLC_ENOMEM;
+
+        p_sys->i_media = i_packet_length - 8;
+        memcpy( p_sys->p_media, p_data + 8, p_sys->i_media );
 /*        msg_Dbg( p_access,
                  "receive media packet (%d bytes)",
                  i_packet_length - 8 ); */
@@ -1304,7 +1335,7 @@ static int  mms_ParsePacket( access_t *p_access,
     }
 }
 
-static int mms_ReceivePacket( access_t *p_access )
+static int mms_ReceivePacket( stream_t *p_access )
 {
     access_sys_t *p_sys = p_access->p_sys;
     int i_packet_tcp_type;
@@ -1320,7 +1351,7 @@ static int mms_ReceivePacket( access_t *p_access )
             if( GetDWLE( p_sys->buffer_tcp + 4 ) == 0xb00bface  )
             {
                 if( GetDWLE( p_sys->buffer_tcp + 8 ) + 16 <=
-                    (uint32_t)p_sys->i_buffer_tcp )
+                    (size_t)p_sys->i_buffer_tcp )
                 {
                     b_refill = false;
                 }
@@ -1347,7 +1378,7 @@ static int mms_ReceivePacket( access_t *p_access )
 
         if( p_sys->i_buffer_tcp > 0 )
         {
-            int i_used;
+            size_t i_used;
 
             if( GetDWLE( p_sys->buffer_tcp + 4 ) == 0xb00bface )
             {
@@ -1371,7 +1402,7 @@ static int mms_ReceivePacket( access_t *p_access )
         }
         else if( p_sys->i_buffer_udp > 0 )
         {
-            int i_used;
+            size_t i_used;
 
             i_packet_udp_type =
                 mms_ParsePacket( p_access, p_sys->buffer_udp,
@@ -1402,13 +1433,13 @@ static int mms_ReceivePacket( access_t *p_access )
     }
 }
 
-static int mms_ReceiveCommand( access_t *p_access )
+static int mms_ReceiveCommand( stream_t *p_access )
 {
     access_sys_t *p_sys = p_access->p_sys;
 
     for( ;; )
     {
-        int i_used;
+        size_t i_used;
         int i_status;
 
         if( NetFillBuffer( p_access ) < 0 )
@@ -1451,9 +1482,8 @@ static int mms_ReceiveCommand( access_t *p_access )
 }
 
 #define MMS_RETRY_MAX       10
-#define MMS_RETRY_SLEEP     50000
 
-static int mms_CommandRead( access_t *p_access, int i_command1,
+static int mms_CommandRead( stream_t *p_access, int i_command1,
                             int i_command2 )
 {
     access_sys_t *p_sys = p_access->p_sys;
@@ -1466,7 +1496,6 @@ static int mms_CommandRead( access_t *p_access, int i_command1,
         if( i_status < 0 || p_sys->i_command == 0 )
         {
             i_count++;
-            msleep( MMS_RETRY_SLEEP );
         }
         else if( i_command1 == 0 && i_command2 == 0)
         {
@@ -1483,25 +1512,25 @@ static int mms_CommandRead( access_t *p_access, int i_command1,
             {
                 case 0x03:
                     msg_Warn( p_access, "socket closed by server" );
-                    p_access->info.b_eof = true;
+                    p_sys->b_eof = true;
                     return VLC_EGENERIC;
                 case 0x1e:
                     msg_Warn( p_access, "end of media stream" );
-                    p_access->info.b_eof = true;
+                    p_sys->b_eof = true;
                     return VLC_EGENERIC;
                 default:
                     break;
             }
         }
     }
-    p_access->info.b_eof = true;
+    p_sys->b_eof = true;
     msg_Warn( p_access, "failed to receive command (aborting)" );
 
     return VLC_EGENERIC;
 }
 
 
-static int mms_HeaderMediaRead( access_t *p_access, int i_type )
+static int mms_HeaderMediaRead( stream_t *p_access, int i_type )
 {
     access_sys_t *p_sys = p_access->p_sys;
     int          i_count;
@@ -1510,16 +1539,12 @@ static int mms_HeaderMediaRead( access_t *p_access, int i_type )
     {
         int i_status;
 
-        if( !vlc_object_alive (p_access) )
-            return -1;
-
         i_status = mms_ReceivePacket( p_access );
         if( i_status < 0 )
         {
             i_count++;
             msg_Warn( p_access, "cannot receive header (%d/%d)",
                       i_count, MMS_RETRY_MAX );
-            msleep( MMS_RETRY_SLEEP );
         }
         else if( i_status == i_type || i_type == MMS_PACKET_ANY )
         {
@@ -1531,11 +1556,11 @@ static int mms_HeaderMediaRead( access_t *p_access, int i_type )
             {
                 case 0x03:
                     msg_Warn( p_access, "socket closed by server" );
-                    p_access->info.b_eof = true;
+                    p_sys->b_eof = true;
                     return -1;
                 case 0x1e:
                     msg_Warn( p_access, "end of media stream" );
-                    p_access->info.b_eof = true;
+                    p_sys->b_eof = true;
                     return -1;
                 case 0x20:
                     /* XXX not too dificult to be done EXCEPT that we
@@ -1543,7 +1568,7 @@ static int mms_HeaderMediaRead( access_t *p_access, int i_type )
                      * could do that :p */
                     msg_Err( p_access,
                              "reinitialization needed --> unsupported" );
-                    p_access->info.b_eof = true;
+                    p_sys->b_eof = true;
                     return -1;
                 default:
                     break;
@@ -1553,47 +1578,42 @@ static int mms_HeaderMediaRead( access_t *p_access, int i_type )
 
     msg_Err( p_access, "cannot receive %s (aborting)",
              ( i_type == MMS_PACKET_HEADER ) ? "header" : "media data" );
-    p_access->info.b_eof = true;
+    p_sys->b_eof = true;
     return -1;
 }
 
-VLC_NORETURN
 static void *KeepAliveThread( void *p_data )
 {
-    access_t *p_access = p_data;
+    stream_t *p_access = p_data;
+    access_sys_t *p_sys = p_access->p_sys;
 
-    for( ;; )
-    {
-        /* Send keep-alive every ten seconds */
-        int canc = vlc_savecancel();
-
+    do  /* Send keep-alive every ten seconds */
         mms_CommandSend( p_access, 0x1b, 0, 0, NULL, 0 );
+    while (vlc_sem_timedwait( &p_sys->keep_alive.sem,
+                              vlc_tick_now() + VLC_TICK_FROM_SEC(10) ));
 
-        vlc_restorecancel( canc );
-
-        msleep( 10 * CLOCK_FREQ );
-    }
-    assert(0);
+    return NULL;
 }
 
-static void KeepAliveStart( access_t *p_access )
+static void KeepAliveStart( stream_t *p_access )
 {
     access_sys_t *p_sys = p_access->p_sys;
     if( p_sys->b_keep_alive )
         return;
 
-    p_sys->b_keep_alive = !vlc_clone( &p_sys->keep_alive,
+    vlc_sem_init( &p_sys->keep_alive.sem, 0 );
+    p_sys->b_keep_alive = !vlc_clone( &p_sys->keep_alive.thread,
                                       KeepAliveThread, p_access,
                                       VLC_THREAD_PRIORITY_LOW );
 }
 
-static void KeepAliveStop( access_t *p_access )
+static void KeepAliveStop( stream_t *p_access )
 {
     access_sys_t *p_sys = p_access->p_sys;
     if( !p_sys->b_keep_alive )
         return;
 
-    vlc_cancel( p_sys->keep_alive );
-    vlc_join( p_sys->keep_alive, NULL );
+    vlc_sem_post( &p_sys->keep_alive.sem );
+    vlc_join( p_sys->keep_alive.thread, NULL );
     p_sys->b_keep_alive = false;
 }

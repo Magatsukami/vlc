@@ -2,7 +2,6 @@
  * rv32.c: conversion plugin to RV32 format.
  *****************************************************************************
  * Copyright (C) 2005 VLC authors and VideoLAN
- * $Id$
  *
  * Author: Cyril Deguet <asmax@videolan.org>
  *
@@ -31,6 +30,7 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_filter.h>
+#include <vlc_picture.h>
 
 /****************************************************************************
  * Local prototypes
@@ -43,8 +43,8 @@ static picture_t *Filter( filter_t *, picture_t * );
  *****************************************************************************/
 vlc_module_begin ()
     set_description( N_("RV32 conversion filter") )
-    set_capability( "video filter2", 1 )
-    set_callbacks( OpenFilter, NULL )
+    set_capability( "video converter", 1 )
+    set_callback( OpenFilter )
 vlc_module_end ()
 
 /*****************************************************************************
@@ -63,7 +63,8 @@ static int OpenFilter( vlc_object_t *p_this )
     }
 
     if( p_filter->fmt_in.video.i_width != p_filter->fmt_out.video.i_width
-     || p_filter->fmt_in.video.i_height != p_filter->fmt_out.video.i_height )
+     || p_filter->fmt_in.video.i_height != p_filter->fmt_out.video.i_height
+     || p_filter->fmt_in.video.orientation != p_filter->fmt_out.video.orientation)
         return -1;
 
     p_filter->pf_video_filter = Filter;

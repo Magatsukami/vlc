@@ -4,7 +4,7 @@
  * Copyright (C) 2005-2006 VLC authors and VideoLAN
  * Copyright © 2005-2008 Rémi Denis-Courmont
  *
- * Authors: Rémi Denis-Courmont <rem # videolan.org>
+ * Authors: Rémi Denis-Courmont
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published by
@@ -30,7 +30,7 @@
 
 #include <vlc_common.h>
 #include <vlc_fs.h>
-#include <vlc_rand.h>
+#include <vlc_sort.h>
 
 #include <assert.h>
 
@@ -94,7 +94,7 @@ FILE *vlc_fopen (const char *filename, const char *mode)
 
     FILE *stream = fdopen (fd, mode);
     if (stream == NULL)
-        close (fd);
+        vlc_close (fd);
 
     return stream;
 }
@@ -104,6 +104,14 @@ static int dummy_select( const char *str )
 {
     (void)str;
     return 1;
+}
+
+static int compar_void(const void *a, const void *b, void *data)
+{
+    const char *sa = a, *sb = b;
+    int (*cmp)(const char **, const char **) = data;
+
+    return cmp(&sa, &sb);
 }
 
 /**
@@ -153,9 +161,8 @@ int vlc_loaddir( DIR *dir, char ***namelist,
             num++;
     }
 
-    if (compar != NULL)
-        qsort (tab, num, sizeof (*tab),
-               (int (*)( const void *, const void *))compar);
+    if (compar != NULL && num > 0)
+        vlc_qsort(tab, num, sizeof (*tab), compar_void, compar);
     *namelist = tab;
     return num;
 
@@ -192,20 +199,24 @@ int vlc_scandir( const char *dirname, char ***namelist,
     return val;
 }
 
-int vlc_mkstemp( char *template )
-{
-    static const char digits[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    static const int i_digits = sizeof(digits)/sizeof(*digits) - 1;
+# include <vlc_rand.h>
 
-    /* */
-    assert( template );
+VLC_WEAK int vlc_mkstemp(char *template)
+{
+    static const char bytes[] =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqstruvwxyz_-";
+    static const size_t nbytes = ARRAY_SIZE(bytes) - 1;
+    char *pattern;
+
+    static_assert(((ARRAY_SIZE(bytes) - 1) & (ARRAY_SIZE(bytes) - 2)) == 0,
+                  "statistical bias");
 
     /* Check template validity */
-    const size_t i_length = strlen( template );
-    char *psz_rand = &template[i_length-6];
+    assert(template != NULL);
 
-    if( i_length < 6 || strcmp( psz_rand, "XXXXXX" ) )
-    {
+    const size_t len = strlen(template);
+    if (len < 6
+     || strcmp(pattern = template + len - 6, "XXXXXX")) {
         errno = EINVAL;
         return -1;
     }
@@ -218,7 +229,7 @@ int vlc_mkstemp( char *template )
 
         vlc_rand_bytes( pi_rand, sizeof(pi_rand) );
         for( int j = 0; j < 6; j++ )
-            psz_rand[j] = digits[pi_rand[j] % i_digits];
+            pattern[j] = bytes[pi_rand[j] % nbytes];
 
         /* */
         int fd = vlc_open( template, O_CREAT | O_EXCL | O_RDWR, 0600 );

@@ -2,7 +2,6 @@
  * vout_manager.hpp
  *****************************************************************************
  * Copyright (C) 2009 the VideoLAN team
- * $Id$
  *
  * Authors: Erwan Tulou < brezhoneg1 at yahoo.fr r>
  *
@@ -27,8 +26,7 @@
 #include <vector>
 
 #include <vlc_vout.h>
-#include <vlc_vout_window.h>
-#include <vlc_keys.h>
+#include <vlc_actions.h>
 #include "../utils/position.hpp"
 #include "../commands/cmd_generic.hpp"
 #include "../controls/ctrl_video.hpp"
@@ -39,19 +37,20 @@
 class VarBool;
 class GenericWindow;
 class FscWindow;
+struct vout_window_t;
 
 #include <stdio.h>
 
 class SavedWnd
 {
 public:
-    SavedWnd( vout_window_t* pWnd, VoutWindow* pVoutWindow = NULL,
+    SavedWnd( struct vout_window_t* pWnd, VoutWindow* pVoutWindow = NULL,
                CtrlVideo* pCtrlVideo = NULL, int height = -1, int width = -1 )
             : pWnd( pWnd ), pVoutWindow( pVoutWindow ),
               pCtrlVideo( pCtrlVideo ), height( height ), width( width ) { }
     ~SavedWnd() { }
 
-    vout_window_t* pWnd;
+    struct vout_window_t* pWnd;
     VoutWindow *pVoutWindow;
     CtrlVideo *pCtrlVideo;
     int height;
@@ -77,8 +76,7 @@ public:
     {
         // Only do the action when the key is down
         if( rEvtKey.getKeyState() == EvtKey::kDown )
-            var_SetInteger( getIntf()->p_libvlc, "key-pressed",
-                             rEvtKey.getModKey() );
+            getIntf()->p_sys->p_dialogs->sendKey( rEvtKey.getModKey() );
     }
 
     virtual void processEvent( EvtScroll &rEvtScroll )
@@ -89,7 +87,7 @@ public:
         i_vlck |= ( rEvtScroll.getDirection() == EvtScroll::kUp ) ?
                   KEY_MOUSEWHEELUP : KEY_MOUSEWHEELDOWN;
 
-        var_SetInteger( getIntf()->p_libvlc, "key-pressed", i_vlck );
+        getIntf()->p_sys->p_dialogs->sendKey( i_vlck );
     }
 
 #endif
@@ -108,16 +106,19 @@ public:
     static void destroy( intf_thread_t *pIntf );
 
     /// accept window request (vout window provider)
-    void acceptWnd( vout_window_t *pWnd, int width, int height );
+    void acceptWnd( struct vout_window_t *pWnd, int width, int height );
 
     // release window (vout window provider)
-    void releaseWnd( vout_window_t *pWnd );
+    void releaseWnd( struct vout_window_t *pWnd );
 
     /// set window size (vout window provider)
-    void setSizeWnd( vout_window_t* pWnd, int width, int height );
+    void setSizeWnd( struct vout_window_t* pWnd, int width, int height );
 
     /// set fullscreen mode (vout window provider)
-    void setFullscreenWnd( vout_window_t* pWnd, bool b_fullscreen );
+    void setFullscreenWnd( struct vout_window_t* pWnd, bool b_fullscreen );
+
+    /// hide mouse (vout window provider)
+    void hideMouseWnd( struct vout_window_t* pWnd, bool hide );
 
     // Register Video Controls (when building theme)
     void registerCtrlVideo( CtrlVideo* p_CtrlVideo );
@@ -158,9 +159,9 @@ protected:
 
 private:
 
-    vector<CtrlVideo *> m_pCtrlVideoVec;
-    vector<CtrlVideo *> m_pCtrlVideoVecBackup;
-    vector<SavedWnd> m_SavedWndVec;
+    std::vector<CtrlVideo *> m_pCtrlVideoVec;
+    std::vector<CtrlVideo *> m_pCtrlVideoVecBackup;
+    std::vector<SavedWnd> m_SavedWndVec;
 
     VoutMainWindow* m_pVoutMainWindow;
 

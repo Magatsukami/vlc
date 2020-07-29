@@ -2,7 +2,6 @@
  * fb.c : framebuffer plugin for vlc
  *****************************************************************************
  * Copyright (C) 2000-2009 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Samuel Hocevar <sam@zoy.org>
  *          Jean-Paul Saman
@@ -45,7 +44,6 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_vout_display.h>
-#include <vlc_picture_pool.h>
 #include <vlc_fs.h>
 
 /*****************************************************************************
@@ -68,40 +66,34 @@
     "the values 0=QCIF 1=CIF 2=NTSC 3=PAL, 4=auto (default 4=auto)")
 
 #define HW_ACCEL_TEXT N_("Framebuffer uses hw acceleration")
-#define HW_ACCEL_LONGTEXT N_(\
-    "If your framebuffer supports hardware acceleration or does double buffering " \
-    "in hardware then you must disable this option. It then does double buffering " \
-    "in software.")
+#define HW_ACCEL_LONGTEXT N_("Disable for double buffering in software.")
 
 #define CHROMA_TEXT N_("Image format (default RGB)")
 #define CHROMA_LONGTEXT N_("Chroma fourcc used by the framebuffer. Default is RGB since the fb device has no way to report its chroma.")
 
-static int  Open (vlc_object_t *);
-static void Close(vlc_object_t *);
+static int Open(vout_display_t *vd, const vout_display_cfg_t *cfg,
+                video_format_t *fmtp, vlc_video_context *context);
+static void Close(vout_display_t *vd);
 
 vlc_module_begin ()
     set_shortname("Framebuffer")
     set_category(CAT_VIDEO)
     set_subcategory(SUBCAT_VIDEO_VOUT)
-    add_loadfile(FB_DEV_VAR, "/dev/fb0", DEVICE_TEXT, DEVICE_LONGTEXT,
-                 false)
+    add_loadfile(FB_DEV_VAR, "/dev/fb0", DEVICE_TEXT, DEVICE_LONGTEXT)
     add_bool("fb-tty", true, TTY_TEXT, TTY_LONGTEXT, true)
     add_string( "fb-chroma", NULL, CHROMA_TEXT, CHROMA_LONGTEXT, true )
     add_obsolete_string("fb-aspect-ratio")
     add_integer("fb-mode", 4, FB_MODE_TEXT, FB_MODE_LONGTEXT,
                  true)
-    add_bool("fb-hw-accel", true, HW_ACCEL_TEXT, HW_ACCEL_LONGTEXT,
-              true)
+    add_obsolete_bool("fb-hw-accel") /* since 4.0.0 */
     set_description(N_("GNU/Linux framebuffer video output"))
-    set_capability("vout display", 30)
-    set_callbacks(Open, Close)
+    set_callback_display(Open, 30)
 vlc_module_end ()
 
 /*****************************************************************************
  * Local prototypes
  *****************************************************************************/
-static picture_pool_t *Pool  (vout_display_t *, unsigned);
-static void           Display(vout_display_t *, picture_t *, subpicture_t *);
+static void           Display(vout_display_t *, picture_t *);
 static int            Control(vout_display_t *, int, va_list);
 
 /* */
@@ -137,7 +129,6 @@ struct vout_display_sys_t {
     bool                        has_pan;   /* does device supports panning ? */
     struct fb_cmap              fb_cmap;                /* original colormap */
     uint16_t                    *palette;                /* original palette */
-    bool                        is_hw_accel;         /* has hardware support */
 
     /* Video information */
     uint32_t width;
@@ -151,7 +142,6 @@ struct vout_display_sys_t {
     size_t      video_size;                                    /* page size */
 
     picture_t       *picture;
-    picture_pool_t  *pool;
 };
 
 
@@ -174,18 +164,20 @@ static void ClearScreen(vout_display_sys_t *sys)
 /**
  * This function allocates and initializes a FB vout method.
  */
-static int Open(vlc_object_t *object)
+static int Open(vout_display_t *vd, const vout_display_cfg_t *cfg,
+                video_format_t *fmtp, vlc_video_context *context)
 {
-    vout_display_t     *vd = (vout_display_t *)object;
     vout_display_sys_t *sys;
+
+    if (vout_display_cfg_IsWindowed(cfg))
+        return VLC_EGENERIC;
 
     /* Allocate instance and initialize some members */
     vd->sys = sys = calloc(1, sizeof(*sys));
     if (!sys)
         return VLC_ENOMEM;
 
-    /* Does the framebuffer uses hw acceleration? */
-    sys->is_hw_accel = var_InheritBool(vd, "fb-hw-accel");
+    sys->fd = -1;
 
     /* Set tty and fb devices */
     sys->tty = 0; /* 0 == /dev/tty0 == current console */
@@ -248,16 +240,15 @@ static int Open(vlc_object_t *object)
     /* */
     sys->video_ptr = MAP_FAILED;
     sys->picture = NULL;
-    sys->pool = NULL;
 
     if (OpenDisplay(vd, force_resolution)) {
-        Close(VLC_OBJECT(vd));
+        Close(vd);
         return VLC_EGENERIC;
     }
-    vout_display_DeleteWindow(vd, NULL);
 
     /* */
-    video_format_t fmt = vd->fmt;
+    video_format_t fmt;
+    video_format_ApplyRotation(&fmt, fmtp);
 
     if (sys->chroma) {
         fmt.i_chroma = sys->chroma;
@@ -283,7 +274,7 @@ static int Open(vlc_object_t *object)
             break;
         default:
             msg_Err(vd, "unknown screendepth %i", sys->var_info.bits_per_pixel);
-            Close(VLC_OBJECT(vd));
+            Close(vd);
             return VLC_EGENERIC;
         }
         if (sys->var_info.bits_per_pixel != 8) {
@@ -300,35 +291,24 @@ static int Open(vlc_object_t *object)
     fmt.i_visible_height = sys->height;
 
     /* */
-    vout_display_info_t info = vd->info;
-    info.has_hide_mouse = true;
-
-    /* */
-    vd->fmt     = fmt;
-    vd->info    = info;
-    vd->pool    = Pool;
+    *fmtp = fmt;
     vd->prepare = NULL;
     vd->display = Display;
     vd->control = Control;
-    vd->manage  = NULL;
+    vd->close = Close;
 
-    /* */
-    vout_display_SendEventFullscreen(vd, true);
-    vout_display_SendEventDisplaySize(vd, fmt.i_visible_width, fmt.i_visible_height, true);
+    (void) context;
     return VLC_SUCCESS;
 }
 
 /**
  * Terminate an output method created by Open
  */
-static void Close(vlc_object_t *object)
+static void Close(vout_display_t *vd)
 {
-    vout_display_t *vd = (vout_display_t *)object;
     vout_display_sys_t *sys = vd->sys;
 
-    if (sys->pool)
-        picture_pool_Delete(sys->pool);
-    if (!sys->is_hw_accel && sys->picture)
+    if (sys->picture != NULL)
         picture_Release(sys->picture);
 
     CloseDisplay(vd);
@@ -340,32 +320,7 @@ static void Close(vlc_object_t *object)
 }
 
 /* */
-static picture_pool_t *Pool(vout_display_t *vd, unsigned count)
-{
-    vout_display_sys_t *sys = vd->sys;
-
-    if (!sys->pool) {
-        if (!sys->picture) {
-            picture_resource_t rsc;
-
-            memset(&rsc, 0, sizeof(rsc));
-            rsc.p[0].p_pixels = sys->video_ptr;
-            rsc.p[0].i_lines  = sys->var_info.yres;
-            rsc.p[0].i_pitch = sys->line_length;
-
-            sys->picture = picture_NewFromResource(&vd->fmt, &rsc);
-            if (!sys->picture)
-                return NULL;
-        }
-
-        if (sys->is_hw_accel)
-            sys->pool = picture_pool_New(1, &sys->picture);
-        else
-            sys->pool = picture_pool_NewFromFormat(&vd->fmt, count);
-    }
-    return sys->pool;
-}
-static void Display(vout_display_t *vd, picture_t *picture, subpicture_t *subpicture)
+static void Display(vout_display_t *vd, picture_t *picture)
 {
     vout_display_sys_t *sys = vd->sys;
 
@@ -386,28 +341,22 @@ static void Display(vout_display_t *vd, picture_t *picture, subpicture_t *subpic
         }
     }
 
-    if (!sys->is_hw_accel)
-        picture_Copy(sys->picture, picture);
-
-    picture_Release(picture);
-    VLC_UNUSED(subpicture);
+    picture_Copy(sys->picture, picture);
 }
+
 static int Control(vout_display_t *vd, int query, va_list args)
 {
-    vout_display_sys_t *sys = vd->sys;
+    (void) vd; (void) args;
 
     switch (query) {
-    case VOUT_DISPLAY_CHANGE_DISPLAY_SIZE: {
-        const vout_display_cfg_t *cfg = va_arg(args, const vout_display_cfg_t *);
-        if (cfg->display.width  != sys->width ||
-            cfg->display.height != sys->height)
-            return VLC_EGENERIC;
-        return VLC_SUCCESS;
+        case VOUT_DISPLAY_CHANGE_DISPLAY_SIZE:
+        case VOUT_DISPLAY_CHANGE_DISPLAY_FILLED:
+        case VOUT_DISPLAY_CHANGE_ZOOM:
+        case VOUT_DISPLAY_CHANGE_SOURCE_ASPECT:
+        case VOUT_DISPLAY_CHANGE_SOURCE_CROP:
+            return VLC_SUCCESS;
     }
-    default:
-        msg_Err(vd, "Unsupported query in vout display fb");
-        return VLC_EGENERIC;
-    }
+    return VLC_EGENERIC;
 }
 
 /* following functions are local */
@@ -528,7 +477,6 @@ static int OpenDisplay(vout_display_t *vd, bool force_resolution)
     /* Get framebuffer device information */
     if (ioctl(sys->fd, FBIOGET_VSCREENINFO, &sys->var_info)) {
         msg_Err(vd, "cannot get fb info (%s)", vlc_strerror_c(errno));
-        close(sys->fd);
         return VLC_EGENERIC;
     }
     sys->old_info = sys->var_info;
@@ -547,7 +495,6 @@ static int OpenDisplay(vout_display_t *vd, bool force_resolution)
 
     if (ioctl(sys->fd, FBIOPUT_VSCREENINFO, &sys->var_info)) {
         msg_Err(vd, "cannot set fb info (%s)", vlc_strerror_c(errno));
-        close(sys->fd);
         return VLC_EGENERIC;
     }
 
@@ -560,8 +507,6 @@ static int OpenDisplay(vout_display_t *vd, bool force_resolution)
 
         /* Restore fb config */
         ioctl(sys->fd, FBIOPUT_VSCREENINFO, &sys->old_info);
-
-        close(sys->fd);
         return VLC_EGENERIC;
     }
 
@@ -595,8 +540,6 @@ static int OpenDisplay(vout_display_t *vd, bool force_resolution)
         if (!sys->palette) {
             /* Restore fb config */
             ioctl(sys->fd, FBIOPUT_VSCREENINFO, &sys->old_info);
-
-            close(sys->fd);
             return VLC_ENOMEM;
         }
         sys->fb_cmap.start = 0;
@@ -631,8 +574,6 @@ static int OpenDisplay(vout_display_t *vd, bool force_resolution)
 
         /* Restore fb config */
         ioctl(sys->fd, FBIOPUT_VSCREENINFO, &sys->old_info);
-
-        close(sys->fd);
         return VLC_EGENERIC;
     }
 
@@ -652,9 +593,24 @@ static int OpenDisplay(vout_display_t *vd, bool force_resolution)
 
         /* Restore fb config */
         ioctl(sys->fd, FBIOPUT_VSCREENINFO, &sys->old_info);
-
-        close(sys->fd);
         return VLC_EGENERIC;
+    }
+
+    picture_resource_t rsc = {
+       .p = {
+           [0] = {
+               .p_pixels = sys->video_ptr,
+               .i_lines = sys->var_info.yres,
+               .i_pitch = fix_info.line_length,
+           },
+       },
+    };
+
+    sys->picture = picture_NewFromResource(&vd->fmt, &rsc);
+    if (unlikely(sys->picture == NULL)) {
+        munmap(rsc.p[0].p_pixels, sys->video_size);
+        ioctl(sys->fd, FBIOPUT_VSCREENINFO, &sys->old_info);
+        return VLC_ENOMEM;
     }
 
     ClearScreen(sys);
@@ -690,7 +646,7 @@ static void CloseDisplay(vout_display_t *vd)
         ioctl(sys->fd, FBIOPUT_VSCREENINFO, &sys->old_info);
 
         /* Close fb */
-        close(sys->fd);
+        vlc_close(sys->fd);
     }
 }
 

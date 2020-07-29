@@ -2,7 +2,6 @@
  * hqdn3d.c : high-quality denoise 3D ported from MPlayer
  *****************************************************************************
  * Copyright (C) 2011 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Cheng Sun <chengsun9@gmail.com>
  *
@@ -32,6 +31,7 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_filter.h>
+#include <vlc_picture.h>
 #include "filter_picture.h"
 
 
@@ -61,7 +61,7 @@ static int DenoiseCallback( vlc_object_t *p_this, char const *psz_var,
 vlc_module_begin()
     set_shortname(N_("HQ Denoiser 3D"))
     set_description(N_("High Quality 3D Denoiser filter"))
-    set_capability("video filter2", 0)
+    set_capability("video filter", 0)
     set_category(CAT_VIDEO)
     set_subcategory(SUBCAT_VIDEO_VFILTER)
 
@@ -86,7 +86,7 @@ static const char *const filter_options[] = {
 /*****************************************************************************
  * filter_sys_t
  *****************************************************************************/
-struct filter_sys_t
+typedef struct
 {
     const vlc_chroma_description_t *chroma;
     int w[3], h[3];
@@ -95,7 +95,7 @@ struct filter_sys_t
     bool   b_recalc_coefs;
     vlc_mutex_t coefs_mutex;
     float  luma_spat, luma_temp, chroma_spat, chroma_temp;
-};
+} filter_sys_t;
 
 /*****************************************************************************
  * Open
@@ -179,8 +179,6 @@ static void Close(vlc_object_t *this)
     var_DelCallback( filter, FILTER_PREFIX "luma-temp", DenoiseCallback, sys );
     var_DelCallback( filter, FILTER_PREFIX "chroma-temp", DenoiseCallback, sys );
 
-    vlc_mutex_destroy( &sys->coefs_mutex );
-
     for (int i = 0; i < 3; ++i) {
         free(cfg->Frame[i]);
     }
@@ -201,7 +199,7 @@ static picture_t *Filter(filter_t *filter, picture_t *src)
     if (!src) return NULL;
 
     dst = filter_NewPicture(filter);
-    if (!dst) {
+    if ( unlikely(!dst) ) {
         picture_Release(src);
         return NULL;
     }
@@ -238,6 +236,13 @@ static picture_t *Filter(filter_t *filter, picture_t *src)
             cfg->Coefs[2],
             cfg->Coefs[2],
             cfg->Coefs[3]);
+
+    if(unlikely(!cfg->Frame[0] || !cfg->Frame[1] || !cfg->Frame[2]))
+    {
+        picture_Release( src );
+        picture_Release( dst );
+        return NULL;
+    }
 
     return CopyInfoAndRelease(dst, src);
 }

@@ -2,7 +2,6 @@
  * libvlc_media_list_player.h:  libvlc_media_list API
  *****************************************************************************
  * Copyright (C) 1998-2008 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Pierre d'Herbemont
  *
@@ -24,18 +23,10 @@
 #ifndef LIBVLC_MEDIA_LIST_PLAYER_H
 #define LIBVLC_MEDIA_LIST_PLAYER_H 1
 
-/**
- * \file
- * This file defines libvlc_media_list_player API
- */
-
 # ifdef __cplusplus
 extern "C" {
 # endif
 
-/*****************************************************************************
- * Media List Player
- *****************************************************************************/
 /** \defgroup libvlc_media_list_player LibVLC media list player
  * \ingroup libvlc
  * The LibVLC media list player plays a @ref libvlc_media_list_t list of media,
@@ -44,6 +35,8 @@ extern "C" {
  * The normal @ref libvlc_media_player_t LibVLC media player can only play a
  * single media, and does not handle playlist files properly.
  * @{
+ * \file
+ * LibVLC media list player external API
  */
 
 typedef struct libvlc_media_list_player_t libvlc_media_list_player_t;
@@ -63,6 +56,7 @@ typedef enum libvlc_playback_mode_t
  *
  * \param p_instance libvlc instance
  * \return media list player instance or NULL on error
+ *         (it must be released by libvlc_media_list_player_release())
  */
 LIBVLC_API libvlc_media_list_player_t *
     libvlc_media_list_player_new( libvlc_instance_t * p_instance );
@@ -109,6 +103,17 @@ LIBVLC_API void
                                      libvlc_media_player_t * p_mi );
 
 /**
+ * Get media player of the media_list_player instance.
+ *
+ * \param p_mlp media list player instance
+ * \return media player instance
+ * \note the caller is responsible for releasing the returned instance
+         with libvlc_media_list_player_set_media_player().
+ */
+LIBVLC_API libvlc_media_player_t *
+    libvlc_media_list_player_get_media_player(libvlc_media_list_player_t * p_mlp);
+
+/**
  * Set the media list associated with the player
  *
  * \param p_mlp media list player instance
@@ -136,15 +141,26 @@ LIBVLC_API
 void libvlc_media_list_player_pause(libvlc_media_list_player_t * p_mlp);
 
 /**
+ * Pause or resume media list
+ *
+ * \param p_mlp media list player instance
+ * \param do_pause play/resume if zero, pause if non-zero
+ * \version LibVLC 3.0.0 or later
+ */
+LIBVLC_API
+void libvlc_media_list_player_set_pause(libvlc_media_list_player_t * p_mlp,
+                                        int do_pause);
+
+/**
  * Is media list playing?
  *
  * \param p_mlp media list player instance
- * \return true for playing and false for not playing
  *
- * \libvlc_return_bool
+ * \retval true playing
+ * \retval false not playing
  */
-LIBVLC_API int
-    libvlc_media_list_player_is_playing( libvlc_media_list_player_t * p_mlp );
+LIBVLC_API bool
+libvlc_media_list_player_is_playing(libvlc_media_list_player_t * p_mlp);
 
 /**
  * Get current libvlc_state of media list player
@@ -183,7 +199,7 @@ int libvlc_media_list_player_play_item(libvlc_media_list_player_t * p_mlp,
  * \param p_mlp media list player instance
  */
 LIBVLC_API void
-    libvlc_media_list_player_stop( libvlc_media_list_player_t * p_mlp);
+    libvlc_media_list_player_stop_async( libvlc_media_list_player_t * p_mlp);
 
 /**
  * Play next item from media list

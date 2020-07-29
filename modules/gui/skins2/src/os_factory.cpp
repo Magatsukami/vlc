@@ -2,7 +2,6 @@
  * os_factory.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -28,8 +27,6 @@
 #include "../x11/x11_factory.hpp"
 #elif defined WIN32_SKINS
 #include "../win32/win32_factory.hpp"
-#elif defined MACOSX_SKINS
-#include "../macosx/macosx_factory.hpp"
 #elif defined OS2_SKINS
 #include "../os2/os2_factory.hpp"
 #endif
@@ -43,8 +40,6 @@ OSFactory *OSFactory::instance( intf_thread_t *pIntf )
         pOsFactory = new X11Factory( pIntf );
 #elif defined WIN32_SKINS
         pOsFactory = new Win32Factory( pIntf );
-#elif defined MACOSX_SKINS
-        pOsFactory = new MacOSXFactory( pIntf );
 #elif defined OS2_SKINS
         pOsFactory = new OS2Factory( pIntf );
 #else

@@ -8,10 +8,12 @@
 *.moc.cpp
 *.o
 *.so
+*.trs
 *.pc
 *.vlt
 *.class
 *.dmg
+*.qmlc
 .DS_Store
 .deps
 .libs
@@ -48,7 +50,7 @@ patches/*
 include/vlc/libvlc_version.h
 
 # Ignore build dirs
-build-*
+build*
 contrib-*
 install-*
 

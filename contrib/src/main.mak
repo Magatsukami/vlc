@@ -5,15 +5,12 @@
 
 all: install
 
-# bootstrap configuration
-include config.mak
-
-TOPSRC ?= ../../contrib
-TOPDST ?= ..
 SRC := $(TOPSRC)/src
+SRC_BUILT := $(TOPSRC_BUILT)/src
 TARBALLS := $(TOPSRC)/tarballs
+VLC_TOOLS ?= $(TOPSRC)/../extras/tools/build
 
-PATH :=$(abspath ../../extras/tools/build/bin):$(PATH)
+PATH :=$(abspath $(VLC_TOOLS)/bin):$(PATH)
 export PATH
 
 PKGS_ALL := $(patsubst $(SRC)/%/rules.mak,%,$(wildcard $(SRC)/*/rules.mak))
@@ -21,10 +18,11 @@ DATE := $(shell date +%Y%m%d)
 VPATH := $(TARBALLS)
 
 # Common download locations
-GNU := http://ftp.gnu.org/gnu
-SF := http://heanet.dl.sourceforge.net/sourceforge
+GNU ?= http://ftp.gnu.org/gnu
+SF := https://netcologne.dl.sourceforge.net/
 VIDEOLAN := http://downloads.videolan.org/pub/videolan
 CONTRIB_VIDEOLAN := http://downloads.videolan.org/pub/contrib
+GITHUB := https://github.com/
 
 #
 # Machine-dependent variables
@@ -32,6 +30,9 @@ CONTRIB_VIDEOLAN := http://downloads.videolan.org/pub/contrib
 
 PREFIX ?= $(TOPDST)/$(HOST)
 PREFIX := $(abspath $(PREFIX))
+BUILDPREFIX ?= $(TOPDST)
+BUILDPREFIX := $(abspath $(BUILDPREFIX))
+BUILDBINDIR ?= $(BUILDPREFIX)/bin
 ifneq ($(HOST),$(BUILD))
 HAVE_CROSS_COMPILE = 1
 endif
@@ -40,11 +41,17 @@ ARCH := $(shell $(SRC)/get-arch.sh $(HOST))
 ifeq ($(ARCH)-$(HAVE_WIN32),x86_64-1)
 HAVE_WIN64 := 1
 endif
+ifeq ($(ARCH)-$(HAVE_WIN32),aarch64-1)
+HAVE_WIN64 := 1
+endif
 
-ifdef HAVE_CROSS_COMPILE
-need_pkg = 1
-else
 need_pkg = $(shell $(PKG_CONFIG) $(1) || echo 1)
+
+ifeq ($(findstring mingw32,$(BUILD)),mingw32)
+MSYS_BUILD := 1
+endif
+ifeq ($(findstring msys,$(BUILD)),msys)
+MSYS_BUILD := 1
 endif
 
 #
@@ -63,12 +70,12 @@ endif
 ifneq ($(findstring $(origin AR),undefined default),)
 AR := ar
 endif
-ifneq ($(findstring $(origin RANLIB),undefined default),)
-RANLIB := ranlib
-endif
-ifneq ($(findstring $(origin STRIP),undefined default),)
-STRIP := strip
-endif
+NM ?= nm
+RANLIB ?= ranlib
+STRIP ?= strip
+WIDL ?= widl
+WINDRES ?= windres
+PKG_CONFIG ?= pkg-config
 else
 ifneq ($(findstring $(origin CC),undefined default),)
 CC := $(HOST)-gcc
@@ -82,29 +89,48 @@ endif
 ifneq ($(findstring $(origin AR),undefined default),)
 AR := $(HOST)-ar
 endif
-ifneq ($(findstring $(origin RANLIB),undefined default),)
-RANLIB := $(HOST)-ranlib
+NM ?= $(HOST)-nm
+RANLIB ?= $(HOST)-ranlib
+STRIP ?= $(HOST)-strip
+WIDL ?= $(HOST)-widl
+WINDRES ?= $(HOST)-windres
+
+# On Debian x86_64-w64-mingw32-pkg-config exists, runs but returns an error when checking packages
+ifeq ($(shell unset PKG_CONFIG_LIBDIR; $(HOST)-pkg-config --version 1>/dev/null 2>/dev/null || echo FAIL),)
+PKG_CONFIG ?= $(HOST)-pkg-config
+else
+# Use the regular pkg-config and set some PKG_CONFIG_LIBDIR ourselves
+PKG_CONFIG = pkg-config
+ifeq ($(findstring $(origin PKG_CONFIG_LIBDIR),undefined),)
+# an extra PKG_CONFIG_LIBDIR was provided, use it prioritarily
+PKG_CONFIG_LIBDIR := $(PKG_CONFIG_LIBDIR):/usr/$(HOST)/lib/pkgconfig:/usr/lib/$(HOST)/pkgconfig
+else
+PKG_CONFIG_LIBDIR := /usr/$(HOST)/lib/pkgconfig:/usr/lib/$(HOST)/pkgconfig
 endif
-ifneq ($(findstring $(origin STRIP),undefined default),)
-STRIP := $(HOST)-strip
+export PKG_CONFIG_LIBDIR
+need_pkg = $(shell PKG_CONFIG_LIBDIR=$(PKG_CONFIG_LIBDIR) $(PKG_CONFIG) $(1) || echo 1)
 endif
+
 endif
 
 ifdef HAVE_ANDROID
-CC :=  $(HOST)-gcc --sysroot=$(ANDROID_NDK)/platforms/android-9/arch-$(PLATFORM_SHORT_ARCH)
-CXX := $(HOST)-g++ --sysroot=$(ANDROID_NDK)/platforms/android-9/arch-$(PLATFORM_SHORT_ARCH)
+ifneq ($(findstring $(origin CC),undefined default),)
+CC :=  clang
+endif
+ifneq ($(findstring $(origin CXX),undefined default),)
+CXX := clang++
+endif
+endif
+
+# -fno-stack-check is a workaround for a possible
+# bug in Xcode 11 or macOS 10.15+
+ifdef HAVE_DARWIN_OS
+EXTRA_CFLAGS += -fno-stack-check
+XCODE_FLAGS += OTHER_CFLAGS=-fno-stack-check
 endif
 
 ifdef HAVE_MACOSX
-MIN_OSX_VERSION=10.6
-CC=xcrun cc
-CXX=xcrun c++
-AR=xcrun ar
-LD=xcrun ld
-STRIP=xcrun strip
-RANLIB=xcrun ranlib
-EXTRA_CFLAGS += -isysroot $(MACOSX_SDK) -mmacosx-version-min=$(MIN_OSX_VERSION) -DMACOSX_DEPLOYMENT_TARGET=$(MIN_OSX_VERSION)
-EXTRA_LDFLAGS += -Wl,-syslibroot,$(MACOSX_SDK) -mmacosx-version-min=$(MIN_OSX_VERSION) -isysroot $(MACOSX_SDK) -DMACOSX_DEPLOYMENT_TARGET=$(MIN_OSX_VERSION)
+EXTRA_CXXFLAGS += -stdlib=libc++
 ifeq ($(ARCH),x86_64)
 EXTRA_CFLAGS += -m64
 EXTRA_LDFLAGS += -m64
@@ -113,49 +139,67 @@ EXTRA_CFLAGS += -m32
 EXTRA_LDFLAGS += -m32
 endif
 
-XCODE_FLAGS = -sdk macosx$(OSX_VERSION)
-ifeq ($(shell xcodebuild -version 2>/dev/null | tee /dev/null|head -1|cut -d\  -f2|cut -d. -f1),3)
-XCODE_FLAGS += ARCHS=$(ARCH)
-# XCode 3 doesn't support -arch
-else
 XCODE_FLAGS += -arch $(ARCH)
-endif
 
 endif
 
 CCAS=$(CC) -c
 
 ifdef HAVE_IOS
-CC=xcrun clang
-CXX=xcrun clang++
 ifdef HAVE_NEON
-AS=perl $(abspath ../../extras/tools/build/bin/gas-preprocessor.pl) $(CC)
+AS=perl $(abspath $(VLC_TOOLS)/bin/gas-preprocessor.pl) $(CC)
 CCAS=gas-preprocessor.pl $(CC) -c
-else
-CCAS=$(CC) -c
 endif
-AR=xcrun ar
-LD=xcrun ld
-STRIP=xcrun strip
-RANLIB=xcrun ranlib
-EXTRA_CFLAGS += $(CFLAGS)
-EXTRA_LDFLAGS += $(LDFLAGS)
 endif
 
+LN_S = ln -s
 ifdef HAVE_WIN32
 ifneq ($(shell $(CC) $(CFLAGS) -E -dM -include _mingw.h - < /dev/null | grep -E __MINGW64_VERSION_MAJOR),)
 HAVE_MINGW_W64 := 1
+MINGW_W64_VERSION := $(shell $(CC) $(CFLAGS) -E -dM -include _mingw.h - < /dev/null | grep -E 'define\s__MINGW64_VERSION_MAJOR' | sed -e 's/\#define\s__MINGW64_VERSION_MAJOR\s//')
+HAVE_MINGW64_V8 := $(shell [ $(MINGW_W64_VERSION) -gt 7 ] && echo true)
 endif
+ifndef HAVE_CROSS_COMPILE
+LN_S = cp -R
+endif
+endif
+
+ifdef HAVE_SOLARIS
+ifeq ($(ARCH),x86_64)
+EXTRA_CFLAGS += -m64
+EXTRA_LDFLAGS += -m64
+else
+EXTRA_CFLAGS += -m32
+EXTRA_LDFLAGS += -m32
+endif
+endif
+
+ifdef HAVE_WINSTORE
+EXTRA_CFLAGS += -DWINSTORECOMPAT
+EXTRA_LDFLAGS += -lwindowsappcompat
+endif
+
+ifneq ($(findstring clang, $(shell $(CC) --version 2>/dev/null)),)
+HAVE_CLANG := 1
 endif
 
 cppcheck = $(shell $(CC) $(CFLAGS) -E -dM - < /dev/null | grep -E $(1))
 
 EXTRA_CFLAGS += -I$(PREFIX)/include
 CPPFLAGS := $(CPPFLAGS) $(EXTRA_CFLAGS)
-CFLAGS := $(CFLAGS) $(EXTRA_CFLAGS) -g
-CXXFLAGS := $(CXXFLAGS) $(EXTRA_CFLAGS) -g
-EXTRA_LDFLAGS += -L$(PREFIX)/lib
-LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS)
+CFLAGS := $(CFLAGS) $(EXTRA_CFLAGS)
+CXXFLAGS := $(CXXFLAGS) $(EXTRA_CFLAGS) $(EXTRA_CXXFLAGS)
+LDFLAGS := $(LDFLAGS) -L$(PREFIX)/lib $(EXTRA_LDFLAGS)
+
+ifdef ENABLE_PDB
+ifdef HAVE_CLANG
+ifneq ($(findstring $(ARCH),i686 x86_64),)
+CFLAGS := $(CFLAGS) -gcodeview
+CXXFLAGS := $(CXXFLAGS) -gcodeview
+endif
+endif
+endif
+
 # Do not export those! Use HOSTVARS.
 
 # Do the FPU detection, after we have figured out our compilers and flags.
@@ -173,17 +217,24 @@ HAVE_FPU = 1
 endif
 
 ACLOCAL_AMFLAGS += -I$(PREFIX)/share/aclocal
+ifneq ($(wildcard $(VLC_TOOLS)/share/aclocal/*),)
+ACLOCAL_AMFLAGS += -I$(abspath $(VLC_TOOLS)/share/aclocal)
+endif
 export ACLOCAL_AMFLAGS
 
-PKG_CONFIG ?= pkg-config
+#########
+# Tools #
+#########
+
 ifdef HAVE_CROSS_COMPILE
 # This inhibits .pc file from within the cross-compilation toolchain sysroot.
 # Hopefully, nobody ever needs that.
 PKG_CONFIG_PATH := /usr/share/pkgconfig
-PKG_CONFIG_LIBDIR := /usr/$(HOST)/lib/pkgconfig
-export PKG_CONFIG_LIBDIR
 endif
-PKG_CONFIG_PATH := $(PKG_CONFIG_PATH):$(PREFIX)/lib/pkgconfig
+PKG_CONFIG_PATH := $(PREFIX)/lib/pkgconfig:$(PKG_CONFIG_PATH)
+ifeq ($(findstring mingw32,$(BUILD)),mingw32)
+PKG_CONFIG_PATH := $(shell cygpath -pm ${PKG_CONFIG_PATH})
+endif
 export PKG_CONFIG_PATH
 
 ifndef GIT
@@ -191,43 +242,38 @@ ifeq ($(shell git --version >/dev/null 2>&1 || echo FAIL),)
 GIT = git
 endif
 endif
-GIT ?= $(error git not found!)
+GIT ?= $(error git not found)
 
 ifndef SVN
 ifeq ($(shell svn --version >/dev/null 2>&1 || echo FAIL),)
 SVN = svn
 endif
 endif
-SVN ?= $(error subversion client (svn) not found!)
+SVN ?= $(error subversion client (svn) not found)
 
 ifeq ($(shell curl --version >/dev/null 2>&1 || echo FAIL),)
 download = curl -f -L -- "$(1)" > "$@"
 else ifeq ($(shell wget --version >/dev/null 2>&1 || echo FAIL),)
-download = rm -f $@.tmp && \
+download = (rm -f $@.tmp && \
 	wget --passive -c -p -O $@.tmp "$(1)" && \
 	touch $@.tmp && \
-	mv $@.tmp $@
+	mv $@.tmp $@ )
 else ifeq ($(which fetch >/dev/null 2>&1 || echo FAIL),)
-download = rm -f $@.tmp && \
+download = (rm -f $@.tmp && \
 	fetch -p -o $@.tmp "$(1)" && \
 	touch $@.tmp && \
-	mv $@.tmp $@
+	mv $@.tmp $@)
 else
-download = $(error Neither curl nor wget found!)
+download = $(error Neither curl nor wget found)
 endif
 
-ifeq ($(shell which bzcat >/dev/null 2>&1 || echo FAIL),)
-BZCAT = bzcat
-else
-BZCAT ?= $(error Bunzip2 client (bzcat) not found!)
-endif
+download_pkg = $(call download,$(CONTRIB_VIDEOLAN)/$(2)/$(lastword $(subst /, ,$(@)))) || \
+	( $(call download,$(1)) && echo "Please upload this package $(lastword $(subst /, ,$(@))) to our FTP" )
 
-ifeq ($(shell gzcat --version >/dev/null 2>&1 || echo FAIL),)
-ZCAT = gzcat
-else ifeq ($(shell zcat --version >/dev/null 2>&1 || echo FAIL),)
-ZCAT = zcat
+ifeq ($(shell which xz >/dev/null 2>&1 || echo FAIL),)
+XZ = xz
 else
-ZCAT ?= $(error Gunzip client (zcat) not found!)
+XZ ?= $(error XZ (LZMA) compressor not found)
 endif
 
 ifeq ($(shell sha512sum --version >/dev/null 2>&1 || echo FAIL),)
@@ -237,13 +283,22 @@ SHA512SUM = shasum -a 512 --check
 else ifeq ($(shell openssl version >/dev/null 2>&1 || echo FAIL),)
 SHA512SUM = openssl dgst -sha512
 else
-SHA512SUM = $(error SHA-512 checksumming not found!)
+SHA512SUM = $(error SHA-512 checksumming not found)
+endif
+
+ifeq ($(shell protoc --version >/dev/null 2>&1 || echo FAIL),)
+PROTOC = protoc
+else
+PROTOC ?= $(error Protobuf compiler (protoc) not found)
 endif
 
 #
 # Common helpers
 #
 HOSTCONF := --prefix="$(PREFIX)"
+HOSTCONF += --datarootdir="$(PREFIX)/share"
+HOSTCONF += --includedir="$(PREFIX)/include"
+HOSTCONF += --libdir="$(PREFIX)/lib"
 HOSTCONF += --build="$(BUILD)" --host="$(HOST)" --target="$(HOST)"
 HOSTCONF += --program-prefix=""
 # libtool stuff:
@@ -259,7 +314,27 @@ endif
 HOSTTOOLS := \
 	CC="$(CC)" CXX="$(CXX)" LD="$(LD)" \
 	AR="$(AR)" CCAS="$(CCAS)" RANLIB="$(RANLIB)" STRIP="$(STRIP)" \
-	PATH="$(PREFIX)/bin:$(PATH)"
+	PATH="$(PREFIX)/bin:$(PATH)" \
+	PKG_CONFIG="$(PKG_CONFIG)"
+
+HOSTVARS_MESON := $(HOSTTOOLS) \
+	CPPFLAGS="$(CPPFLAGS)" \
+	CFLAGS="$(CFLAGS)" \
+	CXXFLAGS="$(CXXFLAGS)" \
+	LDFLAGS="$(LDFLAGS)"
+
+# Add these flags after Meson consumed the CFLAGS/CXXFLAGS
+# as when setting those for Meson, it would apply to tests
+# and cause the check if symbols have underscore prefix to
+# incorrectly report they have not, even if they have.
+ifndef WITH_OPTIMIZATION
+CFLAGS := $(CFLAGS) -g -O0
+CXXFLAGS := $(CXXFLAGS) -g -O0
+else
+CFLAGS := $(CFLAGS) -g -O2
+CXXFLAGS := $(CXXFLAGS) -g -O2
+endif
+
 HOSTVARS := $(HOSTTOOLS) \
 	CPPFLAGS="$(CPPFLAGS)" \
 	CFLAGS="$(CFLAGS)" \
@@ -272,13 +347,24 @@ HOSTVARS_PIC := $(HOSTTOOLS) \
 	LDFLAGS="$(LDFLAGS)"
 
 download_git = \
-	rm -Rf $(@:.tar.xz=) && \
-	$(GIT) clone $(2:%=--branch %) $(1) $(@:.tar.xz=) && \
-	(cd $(@:.tar.xz=) && $(GIT) checkout $(3:%= %)) && \
-	rm -Rf $(@:%.tar.xz=%)/.git && \
-	(cd $(dir $@) && \
-	tar cvJ $(notdir $(@:.tar.xz=))) > $@ && \
-	rm -Rf $(@:.tar.xz=)
+	rm -Rf -- "$(@:.tar.xz=)" && \
+	$(GIT) init --bare "$(@:.tar.xz=)" && \
+	(cd "$(@:.tar.xz=)" && \
+	$(GIT) remote add origin "$(1)" && \
+	$(GIT) fetch origin "$(2)") && \
+	(cd "$(@:.tar.xz=)" && \
+	$(GIT) archive --prefix="$(notdir $(@:.tar.xz=))/" \
+		--format=tar "$(3)") > "$(@:.xz=)" && \
+	echo "$(3) $(@)" > "$(@:.tar.xz=.githash)" && \
+	rm -Rf -- "$(@:.tar.xz=)" && \
+	$(XZ) --stdout "$(@:.xz=)" > "$@.tmp" && \
+	rm -f "$(@:.xz=)" && \
+	mv -f -- "$@.tmp" "$@"
+check_githash = \
+	h=`sed -e "s,^\([0-9a-fA-F]\{40\}\) .*/$(notdir $<),\1,g" \
+		< "$(<:.tar.xz=.githash)"` && \
+	test "$$h" = "$1"
+
 checksum = \
 	$(foreach f,$(filter $(TARBALLS)/%,$^), \
 		grep -- " $(f:$(TARBALLS)/%=%)$$" \
@@ -287,13 +373,13 @@ checksum = \
 		"$(SRC)/$(patsubst .sum-%,%,$@)/$(2)SUMS"
 CHECK_SHA512 = $(call checksum,$(SHA512SUM),SHA512)
 UNPACK = $(RM) -R $@ \
-	$(foreach f,$(filter %.tar.gz %.tgz,$^), && tar xvzf $(f)) \
-	$(foreach f,$(filter %.tar.bz2,$^), && tar xvjf $(f)) \
-	$(foreach f,$(filter %.tar.xz,$^), && tar xvJf $(f)) \
+	$(foreach f,$(filter %.tar.gz %.tgz,$^), && tar xvzfo $(f)) \
+	$(foreach f,$(filter %.tar.bz2,$^), && tar xvjfo $(f)) \
+	$(foreach f,$(filter %.tar.xz,$^), && tar xvJfo $(f)) \
 	$(foreach f,$(filter %.zip,$^), && unzip $(f))
-UNPACK_DIR = $(basename $(basename $(notdir $<)))
+UNPACK_DIR = $(patsubst %.tar,%,$(basename $(notdir $<)))
 APPLY = (cd $(UNPACK_DIR) && patch -fp1) <
-pkg_static = (cd $(UNPACK_DIR) && ../../../contrib/src/pkg-static.sh $(1))
+pkg_static = (cd $(UNPACK_DIR) && $(SRC_BUILT)/pkg-static.sh $(1))
 MOVE = mv $(UNPACK_DIR) $@ && touch $@
 
 AUTOMAKE_DATA_DIRS=$(foreach n,$(foreach n,$(subst :, ,$(shell echo $$PATH)),$(abspath $(n)/../share)),$(wildcard $(n)/automake*))
@@ -304,10 +390,70 @@ UPDATE_AUTOCONFIG = for dir in $(AUTOMAKE_DATA_DIRS); do \
 		fi; \
 	done
 
+ifdef HAVE_DARWIN_OS
+AUTORECONF = AUTOPOINT=true autoreconf
+else
+AUTORECONF = autoreconf
+endif
 RECONF = mkdir -p -- $(PREFIX)/share/aclocal && \
-	cd $< && autoreconf -fiv $(ACLOCAL_AMFLAGS)
+	cd $< && $(AUTORECONF) -fiv $(ACLOCAL_AMFLAGS)
 CMAKE = cmake . -DCMAKE_TOOLCHAIN_FILE=$(abspath toolchain.cmake) \
-		-DCMAKE_INSTALL_PREFIX=$(PREFIX)
+		-DCMAKE_INSTALL_PREFIX=$(PREFIX) $(CMAKE_GENERATOR) \
+		-DBUILD_SHARED_LIBS:BOOL=OFF
+ifdef HAVE_WIN32
+CMAKE += -DCMAKE_DEBUG_POSTFIX:STRING=
+endif
+ifdef MSYS_BUILD
+CMAKE := PKG_CONFIG_LIBDIR="$(PKG_CONFIG_PATH)" $(CMAKE)
+CMAKE += -DCMAKE_LINK_LIBRARY_SUFFIX:STRING=.a
+endif
+
+ifeq ($(V),1)
+CMAKE += -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON
+endif
+
+MESONFLAGS = --default-library static --prefix "$(PREFIX)" --backend ninja \
+	-Dlibdir=lib
+ifndef WITH_OPTIMIZATION
+MESONFLAGS += --buildtype debug
+else
+MESONFLAGS += --buildtype debugoptimized
+endif
+
+ifdef HAVE_CROSS_COMPILE
+# When cross-compiling meson uses the env vars like
+# CC, CXX, etc. and CFLAGS, CXXFLAGS, etc. for the
+# build machine compiler and not like most other
+# buildsystems for the host compilation. Therefore
+# we clear the enviornment variables using the env
+# command, except PATH, which is needed.
+# The values of the mentioned relevant env variables
+# are passed for the host compilation using the
+# generated crossfile, so everything should work as
+# expected.
+MESONFLAGS += --cross-file $(abspath crossfile.meson)
+MESON = env -i PATH="$(PREFIX)/bin:$(PATH)" PKG_CONFIG_LIBDIR="$(PKG_CONFIG_LIBDIR)" \
+	PKG_CONFIG_PATH="$(PKG_CONFIG_PATH)" \
+	meson -Dpkg_config_libdir="$(PKG_CONFIG_LIBDIR)" \
+	-Dpkg_config_path="$(PKG_CONFIG_PATH)" \
+	$(MESONFLAGS)
+
+else
+MESON = meson $(MESONFLAGS)
+endif
+
+ifdef GPL
+REQUIRE_GPL =
+else
+REQUIRE_GPL = @echo "Package \"$<\" requires the GPL license." >&2; exit 1
+endif
+ifdef GNUV3
+REQUIRE_GNUV3 =
+else
+REQUIRE_GNUV3 = \
+	@echo "Package \"$<\" requires the version 3 of GNU licenses." >&2; \
+	exit 1
+endif
 
 #
 # Per-package build rules
@@ -339,7 +485,9 @@ install: $(PKGS:%=.%)
 mostlyclean:
 	-$(RM) $(foreach p,$(PKGS_ALL),.$(p) .sum-$(p) .dep-$(p))
 	-$(RM) toolchain.cmake
+	-$(RM) crossfile.meson
 	-$(RM) -R "$(PREFIX)"
+	-$(RM) -R "$(BUILDBINDIR)"
 	-$(RM) -R */
 
 clean: mostlyclean
@@ -349,64 +497,105 @@ distclean: clean
 	$(RM) config.mak
 	unlink Makefile
 
-PREBUILT_URL=ftp://ftp.videolan.org/pub/videolan/contrib/$(HOST)/vlc-contrib-$(HOST)-latest.tar.bz2
+PREBUILT_URL=http://download.videolan.org/pub/videolan/contrib/$(HOST)/vlc-contrib-$(HOST)-latest.tar.bz2
 
 vlc-contrib-$(HOST)-latest.tar.bz2:
 	$(call download,$(PREBUILT_URL))
 
 prebuilt: vlc-contrib-$(HOST)-latest.tar.bz2
+	$(RM) -r $(PREFIX)
 	-$(UNPACK)
-	mv $(HOST) $(TOPDST)
-	cd $(TOPDST)/$(HOST) && $(SRC)/change_prefix.sh
+	mv $(HOST) $(PREFIX)
+	cd $(PREFIX) && $(abspath $(SRC))/change_prefix.sh
+ifdef HAVE_WIN32
+ifndef HAVE_CROSS_COMPILE
+	$(RM) `find $(PREFIX)/bin | file -f- | grep ELF | awk -F: '{print $$1}' | xargs`
+endif
+endif
 
 package: install
 	rm -Rf tmp/
 	mkdir -p tmp/
-	cp -r $(PREFIX) tmp/
+	cp -R $(PREFIX) tmp/
 	# remove useless files
 	cd tmp/$(notdir $(PREFIX)); \
-		cd share; rm -Rf man doc gtk-doc info lua projectM gettext; cd ..; \
+		cd share; rm -Rf man doc gtk-doc info lua projectM; cd ..; \
 		rm -Rf man sbin etc lib/lua lib/sidplay
 	cd tmp/$(notdir $(PREFIX)) && $(abspath $(SRC))/change_prefix.sh $(PREFIX) @@CONTRIB_PREFIX@@
-	(cd tmp && tar c $(notdir $(PREFIX))/) | bzip2 -c > ../vlc-contrib-$(HOST)-$(DATE).tar.bz2
+ifneq ($(notdir $(PREFIX)),$(HOST))
+	(cd tmp && mv $(notdir $(PREFIX)) $(HOST))
+endif
+	(cd tmp && tar c $(HOST)/) | bzip2 -c > ../vlc-contrib-$(HOST)-$(DATE).tar.bz2
 
 list:
 	@echo All packages:
-	@echo '  $(PKGS_ALL)' | fmt
+	@echo '  $(PKGS_ALL)' | tr " " "\n" | sort | tr "\n" " " |fmt
 	@echo Distribution-provided packages:
-	@echo '  $(PKGS_FOUND)' | fmt
+	@echo '  $(PKGS_FOUND)' | tr " " "\n" | sort | tr "\n" " " |fmt
 	@echo Automatically selected packages:
-	@echo '  $(PKGS_AUTOMATIC)' | fmt
+	@echo '  $(PKGS_AUTOMATIC)' | tr " " "\n" | sort | tr "\n" " " |fmt
 	@echo Manually deselected packages:
-	@echo '  $(PKGS_DISABLE)' | fmt
+	@echo '  $(PKGS_DISABLE)' | tr " " "\n" | sort | tr "\n" " " |fmt
 	@echo Manually selected packages:
-	@echo '  $(PKGS_ENABLE)' | fmt
+	@echo '  $(PKGS_ENABLE)' | tr " " "\n" | sort | tr "\n" " " |fmt
 	@echo Depended-on packages:
-	@echo '  $(PKGS_DEPS)' | fmt
+	@echo '  $(PKGS_DEPS)' | tr " " "\n" | sort | tr "\n" " " |fmt
 	@echo To-be-built packages:
-	@echo '  $(PKGS)' | fmt
+	@echo '  $(PKGS)' | tr " " "\n" | sort | tr "\n" " " |fmt
 
-.PHONY: all fetch fetch-all install mostlyclean clean distclean package list prebuilt
+help:
+	@cat $(SRC)/help.txt
+
+.PHONY: all fetch fetch-all install mostlyclean clean distclean package list help prebuilt
+
+CMAKE_SYSTEM_NAME =
+ifdef HAVE_WIN32
+CMAKE_SYSTEM_NAME = Windows
+ifdef HAVE_VISUALSTUDIO
+ifdef HAVE_WINSTORE
+CMAKE_SYSTEM_NAME = WindowsStore
+endif
+ifdef HAVE_WINDOWSPHONE
+CMAKE_SYSTEM_NAME = WindowsPhone
+endif
+endif
+endif
+ifdef HAVE_DARWIN_OS
+CMAKE_SYSTEM_NAME = Darwin
+endif
+
+ifdef HAVE_ANDROID
+CFLAGS += -DANDROID_NATIVE_API_LEVEL=$(ANDROID_API)
+endif
 
 # CMake toolchain
 toolchain.cmake:
 	$(RM) $@
+ifndef WITH_OPTIMIZATION
+	echo "set(CMAKE_BUILD_TYPE Debug)" >> $@
+else
+	echo "set(CMAKE_BUILD_TYPE RelWithDebInfo)" >> $@
+endif
+	echo "set(CMAKE_SYSTEM_PROCESSOR $(ARCH))" >> $@
+	if test -n "$(CMAKE_SYSTEM_NAME)"; then \
+		echo "set(CMAKE_SYSTEM_NAME $(CMAKE_SYSTEM_NAME))" >> $@; \
+	fi;
 ifdef HAVE_WIN32
-	echo "set(CMAKE_SYSTEM_NAME Windows)" >> $@
-	echo "set(CMAKE_RC_COMPILER $(HOST)-windres)" >> $@
+ifdef HAVE_CROSS_COMPILE
+	echo "set(CMAKE_RC_COMPILER $(WINDRES))" >> $@
+endif
 endif
 ifdef HAVE_DARWIN_OS
-	echo "set(CMAKE_SYSTEM_NAME Darwin)" >> $@
-	echo "set(CMAKE_C_FLAGS $(CFLAGS))" >> $@
-	echo "set(CMAKE_CXX_FLAGS $(CFLAGS))" >> $@
-	echo "set(CMAKE_LD_FLAGS $(LDFLAGS))" >> $@
+	echo "set(CMAKE_C_FLAGS \"$(CFLAGS)\")" >> $@
+	echo "set(CMAKE_CXX_FLAGS \"$(CXXFLAGS)\")" >> $@
+	echo "set(CMAKE_LD_FLAGS \"$(LDFLAGS)\")" >> $@
 ifdef HAVE_IOS
-	echo "set(CMAKE_AR ar CACHE FILEPATH "Archiver")" >> $@
 	echo "set(CMAKE_OSX_SYSROOT $(IOS_SDK))" >> $@
 else
 	echo "set(CMAKE_OSX_SYSROOT $(MACOSX_SDK))" >> $@
 endif
 endif
+	echo "set(CMAKE_AR $(AR) CACHE FILEPATH \"Archiver\")" >> $@
 ifdef HAVE_CROSS_COMPILE
 	echo "set(_CMAKE_TOOLCHAIN_PREFIX $(HOST)-)" >> $@
 ifdef HAVE_ANDROID
@@ -418,10 +607,46 @@ endif
 endif
 	echo "set(CMAKE_C_COMPILER $(CC))" >> $@
 	echo "set(CMAKE_CXX_COMPILER $(CXX))" >> $@
+ifdef MSYS_BUILD
+	echo "set(CMAKE_FIND_ROOT_PATH `cygpath -m $(PREFIX)`)" >> $@
+else
 	echo "set(CMAKE_FIND_ROOT_PATH $(PREFIX))" >> $@
+endif
 	echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)" >> $@
+ifdef HAVE_CROSS_COMPILE
 	echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)" >> $@
 	echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)" >> $@
+endif
+
+MESON_SYSTEM_NAME =
+ifdef HAVE_WIN32
+	MESON_SYSTEM_NAME = windows
+else
+ifdef HAVE_DARWIN_OS
+	MESON_SYSTEM_NAME = darwin
+else
+ifdef HAVE_ANDROID
+	MESON_SYSTEM_NAME = android
+else
+ifdef HAVE_LINUX
+	# android has also system = linux and defines HAVE_LINUX
+	MESON_SYSTEM_NAME = linux
+else
+	$(error "No meson system name known for this target")
+endif
+endif
+endif
+endif
+
+crossfile.meson: $(SRC)/gen-meson-crossfile.py
+	$(HOSTVARS_MESON) \
+	WINDRES="$(WINDRES)" \
+	PKG_CONFIG="$(PKG_CONFIG)" \
+	HOST_SYSTEM="$(MESON_SYSTEM_NAME)" \
+	HOST_ARCH="$(subst i386,x86,$(ARCH))" \
+	HOST="$(HOST)" \
+	$(SRC)/gen-meson-crossfile.py $@
+	cat $@
 
 # Default pattern rules
 .sum-%: $(SRC)/%/SHA512SUMS

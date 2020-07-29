@@ -2,7 +2,6 @@
  * popup.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Olivier Teulière <ipkiss@via.ecp.fr>
  *
@@ -49,7 +48,7 @@ public:
     // XXX: it would be nice to use a UString here, if X11 supports it for
     // its menu items (Windows doesn't, unfortunately)
     /// Insert a new menu item to the popup menu, at the position pos
-    void addItem( const string &rLabel, CmdGeneric &rCmd, int pos );
+    void addItem( const std::string &rLabel, CmdGeneric &rCmd, int pos );
 
     /// Create a dummy menu item to separate sections
     void addSeparator( int pos );
@@ -65,7 +64,7 @@ private:
     WindowManager &m_rWindowManager;
 
     /// Actions for the menu items, indexed by the position in the menu
-    map<int, CmdGeneric *> m_actions;
+    std::map<int, CmdGeneric *> m_actions;
 };
 
 typedef CountedPtr<Popup> PopupPtr;

@@ -32,18 +32,19 @@ struct keysym
 {
     char xname[32];
     char uname[64];
-    int32_t xsym;
-    int32_t usym;
+    uint32_t xsym;
+    uint32_t usym;
 };
 
 static int cmpkey (const void *va, const void *vb)
 {
     const struct keysym *ka = va, *kb = vb;
 
-#if (INT_MAX < 0x7fffffff)
-# error Oups!
-#endif
-    return ka->xsym - kb->xsym;
+    if (ka->xsym > kb->xsym)
+        return +1;
+    if (ka->xsym < kb->xsym)
+        return -1;
+    return 0;
 }
 
 static void printkey (const void *node, const VISIT which, const int depth)
@@ -78,9 +79,9 @@ static int parse (FILE *in)
         if (sym == NULL)
             abort ();
 
-        int val = sscanf (line,
-                          "#define XK_%31s %"SCNi32" /*%*cU+%"SCNx32" %63[^*]",
-                          sym->xname, &sym->xsym, &sym->usym, sym->uname);
+        int val = sscanf(line,
+                         "#define XK_%31s 0x%"SCNx32" /*%*cU+%"SCNx32" %63[^*]",
+                         sym->xname, &sym->xsym, &sym->usym, sym->uname);
         if (val < 3)
         {
             free (sym);
@@ -89,7 +90,7 @@ static int parse (FILE *in)
         if (val < 4)
             sym->uname[0] = '\0';
 
-        struct keysym **psym = tsearch (sym, &root, cmpkey);
+        void **psym = tsearch (sym, &root, cmpkey);
         if (psym == NULL)
             abort ();
         if (*psym != sym)

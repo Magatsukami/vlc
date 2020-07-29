@@ -2,7 +2,6 @@
  * chapters.hpp : matroska demuxer
  *****************************************************************************
  * Copyright (C) 2003-2004 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir@via.ecp.fr>
  *          Steve Lhomme <steve.lhomme@free.fr>
@@ -24,10 +23,12 @@
 
 /* chapter_item, chapter_edition, and chapter_translation classes */
 
-#ifndef _CHAPTER_H_
-#define _CHAPTER_H_
+#ifndef VLC_MKV_CHAPTERS_HPP_
+#define VLC_MKV_CHAPTERS_HPP_
 
 #include "mkv.hpp"
+
+namespace mkv {
 
 class chapter_translation_c
 {
@@ -56,7 +57,7 @@ public:
     ,p_segment_uid(NULL)
     ,p_segment_edition_uid(NULL)
     ,b_display_seekpoint(true)
-    ,b_user_display(false)
+    ,b_user_display(true)
     ,p_parent(NULL)
     ,b_is_leaving(false)
     {}
@@ -72,14 +73,14 @@ public:
     bool                        ParentOf( const chapter_item_c & item ) const;
     int16                       GetTitleNumber( ) const;
 
-    int64_t                     i_start_time, i_end_time;
+    vlc_tick_t                  i_start_time, i_end_time;
     std::vector<chapter_item_c*> sub_chapters;
     KaxChapterSegmentUID        *p_segment_uid;
     KaxChapterSegmentEditionUID *p_segment_edition_uid;
     int64_t                     i_uid;
     bool                        b_display_seekpoint;
     bool                        b_user_display;
-    std::string                 psz_name;
+    std::string                 str_name;
     chapter_item_c              *p_parent;
     bool                        b_is_leaving;
 
@@ -87,7 +88,10 @@ public:
 
     bool Enter( bool b_do_subchapters );
     bool Leave( bool b_do_subchapters );
-    bool EnterAndLeave( chapter_item_c *p_item, bool b_enter = true );
+    bool EnterAndLeave( chapter_item_c *p_leaving_chapter, bool b_enter = true );
+
+  protected:
+      bool EnterLeaveHelper_ (bool, bool(chapter_codec_cmds_c::*)(), bool(chapter_item_c::*)(bool));
 };
 
 class chapter_edition_c : public chapter_item_c
@@ -99,8 +103,9 @@ public:
     std::string GetMainName() const;
     bool                        b_ordered;
     bool                        b_default;
-    /* TODO handle hidden chapters */
     bool                        b_hidden;
 };
+
+} // namespace
 
 #endif

@@ -2,7 +2,6 @@
  * generic_layout.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -122,7 +121,7 @@ public:
                              int layer );
 
     /// Get the list of the controls in this layout, by layer order
-    virtual const list<LayeredControl> &getControlList() const;
+    virtual const std::list<LayeredControl> &getControlList() const;
 
     /// Called by a control when its image has changed
     /**
@@ -135,7 +134,7 @@ public:
                                   int xOffSet, int yOffSet );
 
     /// Get the list of the anchors of this layout
-    virtual const list<Anchor*>& getAnchorList() const;
+    virtual const std::list<Anchor*>& getAnchorList() const;
 
     /// Add an anchor to this layout
     virtual void addAnchor( Anchor *pAnchor );
@@ -163,11 +162,11 @@ private:
     /// Image of the layout
     OSGraphics *m_pImage;
     /// List of the controls in the layout
-    list<LayeredControl> m_controlList;
+    std::list<LayeredControl> m_controlList;
     /// Video control(s)
-    set<CtrlVideo *> m_pVideoCtrlSet;
+    std::set<CtrlVideo *> m_pVideoCtrlSet;
     /// List of the anchors in the layout
-    list<Anchor*> m_anchorList;
+    std::list<Anchor*> m_anchorList;
     /// Flag to know if the layout is visible
     bool m_visible;
     /// Variable for the "active state" of the layout

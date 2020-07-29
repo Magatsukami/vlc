@@ -2,13 +2,12 @@
  * libvlc.c: libvlc instances creation and deletion, interfaces handling
  *****************************************************************************
  * Copyright (C) 1998-2008 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Vincent Seguin <seguin@via.ecp.fr>
  *          Samuel Hocevar <sam@zoy.org>
  *          Gildas Bazin <gbazin@videolan.org>
  *          Derk-Jan Hartman <hartman at videolan dot org>
- *          Rémi Denis-Courmont <rem # videolan : org>
+ *          Rémi Denis-Courmont
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published by
@@ -38,11 +37,11 @@
 
 #include <vlc_common.h>
 #include "../lib/libvlc_internal.h"
-#include <vlc_input.h>
 
 #include "modules/modules.h"
 #include "config/configuration.h"
-#include "playlist/preparser.h"
+#include "preparser/preparser.h"
+#include "media_source/media_source.h"
 
 #include <stdio.h>                                              /* sprintf() */
 #include <string.h>
@@ -51,30 +50,23 @@
 
 #include "config/vlc_getopt.h"
 
-#ifdef HAVE_DBUS
-/* used for one-instance mode */
-#   include <dbus/dbus.h>
-#endif
-
-
 #include <vlc_playlist.h>
 #include <vlc_interface.h>
 
+#include <vlc_actions.h>
 #include <vlc_charset.h>
+#include <vlc_dialog.h>
+#include <vlc_keystore.h>
 #include <vlc_fs.h>
 #include <vlc_cpu.h>
 #include <vlc_url.h>
 #include <vlc_modules.h>
+#include <vlc_media_library.h>
+#include <vlc_thumbnailer.h>
 
 #include "libvlc.h"
-#include "playlist/playlist_internal.h"
-#include "misc/variables.h"
 
 #include <vlc_vlm.h>
-
-#ifdef __APPLE__
-# include <libkern/OSAtomic.h>
-#endif
 
 #include <assert.h>
 
@@ -84,30 +76,46 @@
 static void GetFilenames  ( libvlc_int_t *, unsigned, const char *const [] );
 
 /**
- * Allocate a libvlc instance, initialize global data if needed
- * It also initializes the threading system
+ * Allocate a blank libvlc instance, also setting the exit handler.
+ * Vlc's threading system must have been initialized first
  */
 libvlc_int_t * libvlc_InternalCreate( void )
 {
     libvlc_int_t *p_libvlc;
     libvlc_priv_t *priv;
 
-    /* Now that the thread system is initialized, we don't have much, but
-     * at least we have variables */
     /* Allocate a libvlc instance object */
-    p_libvlc = vlc_custom_create( (vlc_object_t *)NULL, sizeof (*priv),
-                                  "libvlc" );
+    p_libvlc = (vlc_custom_create)( NULL, sizeof (*priv), "libvlc" );
     if( p_libvlc == NULL )
         return NULL;
 
     priv = libvlc_priv (p_libvlc);
-    priv->playlist = NULL;
-    priv->p_dialog_provider = NULL;
+    vlc_mutex_init(&priv->lock);
+    priv->interfaces = NULL;
+    priv->main_playlist = NULL;
     priv->p_vlm = NULL;
+    priv->media_source_provider = NULL;
 
     vlc_ExitInit( &priv->exit );
 
     return p_libvlc;
+}
+
+static void libvlc_AddInterfaces(libvlc_int_t *libvlc, const char *varname)
+{
+    char *str = var_InheritString(libvlc, varname);
+    if (str == NULL)
+        return;
+
+    char *state;
+    char *intf = strtok_r(str, ":", &state);
+
+    while (intf != NULL) {
+        libvlc_InternalAddIntf(libvlc, intf);
+        intf = strtok_r(NULL, ":", &state);
+    }
+
+    free(str);
 }
 
 /**
@@ -122,10 +130,11 @@ int libvlc_InternalInit( libvlc_int_t *p_libvlc, int i_argc,
                          const char *ppsz_argv[] )
 {
     libvlc_priv_t *priv = libvlc_priv (p_libvlc);
-    char *       psz_modules = NULL;
-    char *       psz_parser = NULL;
-    char *       psz_control = NULL;
     char        *psz_val;
+    int          i_ret = VLC_EGENERIC;
+
+    if (unlikely(vlc_LogPreinit(p_libvlc)))
+        return VLC_ENOMEM;
 
     /* System specific initialization code */
     system_Init();
@@ -143,14 +152,13 @@ int libvlc_InternalInit( libvlc_int_t *p_libvlc, int i_argc,
         return VLC_EGENERIC;
     }
 
-    vlc_LogInit (p_libvlc);
     vlc_threads_setup (p_libvlc);
 
     /* Load the builtins and plugins into the module_bank.
      * We have to do it before config_Load*() because this also gets the
      * list of configuration options exported by each module and loads their
      * default values. */
-    size_t module_count = module_LoadPlugins (p_libvlc);
+    module_LoadPlugins (p_libvlc);
 
     /*
      * Override default configuration with config file settings
@@ -168,11 +176,9 @@ int libvlc_InternalInit( libvlc_int_t *p_libvlc, int i_argc,
      */
     int vlc_optind;
     if( config_LoadCmdLine( p_libvlc, i_argc, ppsz_argv, &vlc_optind ) )
-    {
-        module_EndBank (true);
-        vlc_LogDeinit (p_libvlc);
-        return VLC_EGENERIC;
-    }
+        goto error;
+
+    vlc_LogInit(p_libvlc);
 
     /*
      * Support for gettext
@@ -186,194 +192,46 @@ int libvlc_InternalInit( libvlc_int_t *p_libvlc, int i_argc,
 
     if (config_PrintHelp (VLC_OBJECT(p_libvlc)))
     {
-        module_EndBank (true);
+        libvlc_InternalCleanup (p_libvlc);
         exit(0);
     }
 
-    if( module_count <= 1 )
-    {
-        msg_Err( p_libvlc, "No plugins found! Check your VLC installation.");
-        module_EndBank (true);
-        vlc_LogDeinit (p_libvlc);
-        return VLC_ENOMOD;
-    }
+    i_ret = VLC_ENOMEM;
 
-#ifdef HAVE_DAEMON
-    /* Check for daemon mode */
-    if( var_InheritBool( p_libvlc, "daemon" ) )
-    {
-        if( daemon( 1, 0) != 0 )
-        {
-            msg_Err( p_libvlc, "Unable to fork vlc to daemon mode" );
-            module_EndBank (true);
-            vlc_LogDeinit (p_libvlc);
-            return VLC_ENOMEM;
-        }
-
-        /* lets check if we need to write the pidfile */
-        char *pidfile = var_InheritString( p_libvlc, "pidfile" );
-        if( pidfile != NULL )
-        {
-            FILE *stream = vlc_fopen( pidfile, "w" );
-            if( stream != NULL )
-            {
-                fprintf( stream, "%d", (int)getpid() );
-                fclose( stream );
-                msg_Dbg( p_libvlc, "written PID file %s", pidfile );
-            }
-            else
-                msg_Err( p_libvlc, "cannot write PID file %s: %s",
-                         pidfile, vlc_strerror_c(errno) );
-            free( pidfile );
-        }
-    }
-    else
-    {
-        var_Create( p_libvlc, "pidfile", VLC_VAR_STRING );
-        var_SetString( p_libvlc, "pidfile", "" );
-    }
-#endif
-
-/* FIXME: could be replaced by using Unix sockets */
-#ifdef HAVE_DBUS
-
-#define MPRIS_APPEND "/org/mpris/MediaPlayer2/TrackList/Append"
-#define MPRIS_BUS_NAME "org.mpris.MediaPlayer2.vlc"
-#define MPRIS_OBJECT_PATH "/org/mpris/MediaPlayer2"
-#define MPRIS_TRACKLIST_INTERFACE "org.mpris.MediaPlayer2.TrackList"
-
-    if( var_InheritBool( p_libvlc, "one-instance" )
-    || ( var_InheritBool( p_libvlc, "one-instance-when-started-from-file" )
-      && var_InheritBool( p_libvlc, "started-from-file" ) ) )
-    {
-        for( int i = vlc_optind; i < i_argc; i++ )
-            if( ppsz_argv[i][0] == ':' )
-            {
-                msg_Err( p_libvlc, "item option %s incompatible with single instance",
-                         ppsz_argv[i] );
-                goto dbus_out;
-            }
-
-        /* Initialise D-Bus interface, check for other instances */
-        dbus_threads_init_default();
-
-        DBusError err;
-        dbus_error_init( &err );
-
-        /* connect to the session bus */
-        DBusConnection  *conn = dbus_bus_get( DBUS_BUS_SESSION, &err );
-        if( conn == NULL )
-        {
-            msg_Err( p_libvlc, "Failed to connect to D-Bus session daemon: %s",
-                    err.message );
-            dbus_error_free( &err );
-            goto dbus_out;
-        }
-
-        /* check if VLC is available on the bus
-         * if not: D-Bus control is not enabled on the other
-         * instance and we can't pass MRLs to it */
-        /* FIXME: This check is totally brain-dead and buggy. */
-        if( !dbus_bus_name_has_owner( conn, MPRIS_BUS_NAME, &err ) )
-        {
-            dbus_connection_unref( conn );
-            if( dbus_error_is_set( &err ) )
-            {
-                msg_Err( p_libvlc, "D-Bus error: %s", err.message );
-            }
-            else
-                msg_Dbg( p_libvlc, "No media player running. Continuing normally." );
-            dbus_error_free( &err );
-            goto dbus_out;
-        }
-
-        const dbus_bool_t play = !var_InheritBool( p_libvlc, "playlist-enqueue" );
-
-        msg_Warn( p_libvlc, "media player running. Exiting...");
-        for( int i = vlc_optind; i < i_argc; i++ )
-        {
-            DBusMessage *msg = dbus_message_new_method_call(
-               MPRIS_BUS_NAME, MPRIS_OBJECT_PATH, MPRIS_TRACKLIST_INTERFACE, "AddTrack" );
-            if( unlikely(msg == NULL) )
-                continue;
-
-            /* We need to resolve relative paths in this instance */
-            char *mrl;
-            if( strstr( ppsz_argv[i], "://" ) )
-                mrl = strdup( ppsz_argv[i] );
-            else
-                mrl = vlc_path2uri( ppsz_argv[i], NULL );
-            if( mrl == NULL )
-            {
-                dbus_message_unref( msg );
-                continue;
-            }
-
-            const char *after_track = MPRIS_APPEND;
-
-            /* append MRLs */
-            if( !dbus_message_append_args( msg, DBUS_TYPE_STRING, &mrl,
-                                                DBUS_TYPE_OBJECT_PATH, &after_track,
-                                                DBUS_TYPE_BOOLEAN, &play,
-                                                DBUS_TYPE_INVALID ) )
-            {
-                 dbus_message_unref( msg );
-                 msg = NULL;
-                 free( mrl );
-                 continue;
-            }
-
-            msg_Dbg( p_libvlc, "Adds %s to the running media player", mrl );
-            free( mrl );
-
-            /* send message and get a handle for a reply */
-            DBusMessage *reply = dbus_connection_send_with_reply_and_block( conn, msg, -1,
-                                                                            &err );
-            dbus_message_unref( msg );
-            if( reply == NULL )
-            {
-                msg_Err( p_libvlc, "D-Bus error: %s", err.message );
-                continue;
-            }
-            dbus_message_unref( reply );
-        }
-        /* we unreference the connection when we've finished with it */
-        dbus_connection_unref( conn );
-        exit( 1 );
-    }
-#undef MPRIS_APPEND
-#undef MPRIS_BUS_NAME
-#undef MPRIS_OBJECT_PATH
-#undef MPRIS_TRACKLIST_INTERFACE
-dbus_out:
-#endif // HAVE_DBUS
+    if( libvlc_InternalDialogInit( p_libvlc ) != VLC_SUCCESS )
+        goto error;
+    if( libvlc_InternalKeystoreInit( p_libvlc ) != VLC_SUCCESS )
+        msg_Warn( p_libvlc, "memory keystore init failed" );
 
     vlc_CPU_dump( VLC_OBJECT(p_libvlc) );
 
-    priv->b_stats = var_InheritBool( p_libvlc, "stats" );
+    if( var_InheritBool( p_libvlc, "media-library") )
+    {
+        priv->p_media_library = libvlc_MlCreate( p_libvlc );
+        if ( priv->p_media_library == NULL )
+            msg_Warn( p_libvlc, "Media library initialization failed" );
+    }
+
+    priv->p_thumbnailer = vlc_thumbnailer_Create( VLC_OBJECT( p_libvlc ) );
+    if ( priv->p_thumbnailer == NULL )
+        msg_Warn( p_libvlc, "Failed to instantiate thumbnailer" );
 
     /*
      * Initialize hotkey handling
      */
-    priv->actions = vlc_InitActions( p_libvlc );
+    if( libvlc_InternalActionsInit( p_libvlc ) != VLC_SUCCESS )
+        goto error;
 
     /*
      * Meta data handling
      */
-    priv->parser = playlist_preparser_New(VLC_OBJECT(p_libvlc));
+    priv->parser = input_preparser_New(VLC_OBJECT(p_libvlc));
+    if( !priv->parser )
+        goto error;
 
-    /* Create a variable for showing the fullscreen interface */
-    var_Create( p_libvlc, "intf-toggle-fscontrol", VLC_VAR_BOOL );
-    var_SetBool( p_libvlc, "intf-toggle-fscontrol", true );
-
-    /* Create a variable for the Boss Key */
-    var_Create( p_libvlc, "intf-boss", VLC_VAR_VOID );
-
-    /* Create a variable for showing the main interface */
-    var_Create( p_libvlc, "intf-show", VLC_VAR_BOOL );
-
-    /* Create a variable for showing the right click menu */
-    var_Create( p_libvlc, "intf-popupmenu", VLC_VAR_BOOL );
+    priv->media_source_provider = vlc_media_source_provider_New( VLC_OBJECT( p_libvlc ) );
+    if( !priv->media_source_provider )
+        goto error;
 
     /* variables for signalling creation of new files */
     var_Create( p_libvlc, "snapshot-file", VLC_VAR_STRING );
@@ -381,6 +239,8 @@ dbus_out:
 
     /* some default internal settings */
     var_Create( p_libvlc, "window", VLC_VAR_STRING );
+    var_Create( p_libvlc, "vout-cb-type", VLC_VAR_INTEGER );
+
     /* NOTE: Because the playlist and interfaces start before this function
      * returns control to the application (DESIGN BUG!), all these variables
      * must be created (in place of libvlc_new()) and set to VLC defaults
@@ -403,75 +263,21 @@ dbus_out:
 
 #ifdef ENABLE_VLM
     /* Initialize VLM if vlm-conf is specified */
-    psz_parser = var_CreateGetNonEmptyString( p_libvlc, "vlm-conf" );
+    char *psz_parser = var_InheritString( p_libvlc, "vlm-conf" );
     if( psz_parser )
     {
-        priv->p_vlm = vlm_New( p_libvlc );
+        priv->p_vlm = vlm_New( p_libvlc, psz_parser );
         if( !priv->p_vlm )
             msg_Err( p_libvlc, "VLM initialization failed" );
+        free( psz_parser );
     }
-    free( psz_parser );
 #endif
 
     /*
      * Load background interfaces
      */
-    psz_modules = var_CreateGetNonEmptyString( p_libvlc, "extraintf" );
-    psz_control = var_CreateGetNonEmptyString( p_libvlc, "control" );
-
-    if( psz_modules && psz_control )
-    {
-        char* psz_tmp;
-        if( asprintf( &psz_tmp, "%s:%s", psz_modules, psz_control ) != -1 )
-        {
-            free( psz_modules );
-            psz_modules = psz_tmp;
-        }
-    }
-    else if( psz_control )
-    {
-        free( psz_modules );
-        psz_modules = strdup( psz_control );
-    }
-
-    psz_parser = psz_modules;
-    while ( psz_parser && *psz_parser )
-    {
-        char *psz_module, *psz_temp;
-        psz_module = psz_parser;
-        psz_parser = strchr( psz_module, ':' );
-        if ( psz_parser )
-        {
-            *psz_parser = '\0';
-            psz_parser++;
-        }
-        if( asprintf( &psz_temp, "%s,none", psz_module ) != -1)
-        {
-            libvlc_InternalAddIntf( p_libvlc, psz_temp );
-            free( psz_temp );
-        }
-    }
-    free( psz_modules );
-    free( psz_control );
-
-#ifdef HAVE_SYSLOG_H
-    if( var_InheritBool( p_libvlc, "syslog" ) )
-    {
-        char *logmode = var_CreateGetNonEmptyString( p_libvlc, "logmode" );
-        var_SetString( p_libvlc, "logmode", "syslog" );
-        libvlc_InternalAddIntf( p_libvlc, "logger,none" );
-
-        if( logmode )
-        {
-            var_SetString( p_libvlc, "logmode", logmode );
-            free( logmode );
-        }
-        var_Destroy( p_libvlc, "logmode" );
-    }
-    else
-#endif
-    if( var_InheritBool( p_libvlc, "file-logging" ) )
-        libvlc_InternalAddIntf( p_libvlc, "logger,none" );
+    libvlc_AddInterfaces(p_libvlc, "extraintf");
+    libvlc_AddInterfaces(p_libvlc, "control");
 
     if( var_InheritBool( p_libvlc, "network-synchronisation") )
         libvlc_InternalAddIntf( p_libvlc, "netsync,none" );
@@ -486,9 +292,6 @@ dbus_out:
     var_Create( p_libvlc, "drawable-clip-bottom", VLC_VAR_INTEGER );
     var_Create( p_libvlc, "drawable-clip-right", VLC_VAR_INTEGER );
     var_Create( p_libvlc, "drawable-nsobject", VLC_VAR_ADDRESS );
-#endif
-#if defined (_WIN32) || defined (__OS2__)
-    var_Create( p_libvlc, "drawable-hwnd", VLC_VAR_INTEGER );
 #endif
 
     /*
@@ -508,7 +311,25 @@ dbus_out:
         free( psz_val );
     }
 
+    /* Callbacks between interfaces */
+
+    /* Create a variable for showing the right click menu */
+    var_Create(p_libvlc, "intf-popupmenu", VLC_VAR_BOOL);
+
+    /* Create a variable for showing the fullscreen interface */
+    var_Create(p_libvlc, "intf-toggle-fscontrol", VLC_VAR_VOID);
+
+    /* Create a variable for the Boss Key */
+    var_Create(p_libvlc, "intf-boss", VLC_VAR_VOID);
+
+    /* Create a variable for showing the main interface */
+    var_Create(p_libvlc, "intf-show", VLC_VAR_VOID);
+
     return VLC_SUCCESS;
+
+error:
+    libvlc_InternalCleanup( p_libvlc );
+    return i_ret;
 }
 
 /**
@@ -519,10 +340,18 @@ void libvlc_InternalCleanup( libvlc_int_t *p_libvlc )
 {
     libvlc_priv_t *priv = libvlc_priv (p_libvlc);
 
+    if (priv->parser != NULL)
+        input_preparser_Deactivate(priv->parser);
+
     /* Ask the interfaces to stop and destroy them */
     msg_Dbg( p_libvlc, "removing all interfaces" );
-    libvlc_Quit( p_libvlc );
     intf_DestroyAll( p_libvlc );
+
+    if ( priv->p_thumbnailer )
+        vlc_thumbnailer_Release( priv->p_thumbnailer );
+
+    libvlc_InternalDialogClean( p_libvlc );
+    libvlc_InternalKeystoreClean( p_libvlc );
 
 #ifdef ENABLE_VLM
     /* Destroy VLM if created in libvlc_InternalInit */
@@ -545,17 +374,26 @@ void libvlc_InternalCleanup( libvlc_int_t *p_libvlc )
 #endif
 
     if (priv->parser != NULL)
-        playlist_preparser_Delete(priv->parser);
+        input_preparser_Delete(priv->parser);
 
-    vlc_DeinitActions( p_libvlc, priv->actions );
+    if (priv->main_playlist)
+        vlc_playlist_Delete(priv->main_playlist);
+
+    if ( priv->p_media_library )
+        libvlc_MlRelease( priv->p_media_library );
+
+    if( priv->media_source_provider )
+        vlc_media_source_provider_Delete( priv->media_source_provider );
+
+    libvlc_InternalActionsClean( p_libvlc );
 
     /* Save the configuration */
     if( !var_InheritBool( p_libvlc, "ignore-config" ) )
         config_AutoSaveConfigFile( VLC_OBJECT(p_libvlc) );
 
+    vlc_LogDestroy(p_libvlc->obj.logger);
     /* Free module bank. It is refcounted, so we call this each time  */
     module_EndBank (true);
-    vlc_LogDeinit (p_libvlc);
 #if defined(_WIN32) || defined(__OS2__)
     system_End( );
 #endif
@@ -570,12 +408,7 @@ void libvlc_InternalCleanup( libvlc_int_t *p_libvlc )
  */
 void libvlc_InternalDestroy( libvlc_int_t *p_libvlc )
 {
-    libvlc_priv_t *priv = libvlc_priv( p_libvlc );
-
-    vlc_ExitDestroy( &priv->exit );
-
-    assert( atomic_load(&(vlc_internals(p_libvlc)->refs)) == 1 );
-    vlc_object_release( p_libvlc );
+    vlc_object_delete(p_libvlc);
 }
 
 /*****************************************************************************
@@ -617,32 +450,79 @@ static void GetFilenames( libvlc_int_t *p_vlc, unsigned n,
     }
 }
 
-/**
- * Requests extraction of the meta data for an input item (a.k.a. preparsing).
- * The actual extraction is asynchronous.
- */
-int libvlc_MetaRequest(libvlc_int_t *libvlc, input_item_t *item)
+int vlc_MetadataRequest(libvlc_int_t *libvlc, input_item_t *item,
+                        input_item_meta_request_option_t i_options,
+                        const input_preparser_callbacks_t *cbs,
+                        void *cbs_userdata,
+                        int timeout, void *id)
 {
     libvlc_priv_t *priv = libvlc_priv(libvlc);
 
     if (unlikely(priv->parser == NULL))
         return VLC_ENOMEM;
 
-    playlist_preparser_Push(priv->parser, item);
+    input_preparser_Push( priv->parser, item, i_options, cbs, cbs_userdata, timeout, id );
     return VLC_SUCCESS;
+
+}
+
+/**
+ * Requests extraction of the meta data for an input item (a.k.a. preparsing).
+ * The actual extraction is asynchronous. It can be cancelled with
+ * libvlc_MetadataCancel()
+ */
+int libvlc_MetadataRequest(libvlc_int_t *libvlc, input_item_t *item,
+                           input_item_meta_request_option_t i_options,
+                           const input_preparser_callbacks_t *cbs,
+                           void *cbs_userdata,
+                           int timeout, void *id)
+{
+    libvlc_priv_t *priv = libvlc_priv(libvlc);
+    assert(i_options & META_REQUEST_OPTION_SCOPE_ANY);
+
+    if (unlikely(priv->parser == NULL))
+        return VLC_ENOMEM;
+
+    vlc_mutex_lock( &item->lock );
+    if( item->i_preparse_depth == 0 )
+        item->i_preparse_depth = 1;
+    vlc_mutex_unlock( &item->lock );
+
+    return vlc_MetadataRequest(libvlc, item, i_options, cbs, cbs_userdata, timeout, id);
 }
 
 /**
  * Requests retrieving/downloading art for an input item.
  * The retrieval is performed asynchronously.
  */
-int libvlc_ArtRequest(libvlc_int_t *libvlc, input_item_t *item)
+int libvlc_ArtRequest(libvlc_int_t *libvlc, input_item_t *item,
+                      input_item_meta_request_option_t i_options,
+                      const input_fetcher_callbacks_t *cbs,
+                      void *cbs_userdata)
 {
     libvlc_priv_t *priv = libvlc_priv(libvlc);
+    assert(i_options & META_REQUEST_OPTION_FETCH_ANY);
 
     if (unlikely(priv->parser == NULL))
         return VLC_ENOMEM;
 
-    playlist_preparser_fetcher_Push(priv->parser, item);
+    input_preparser_fetcher_Push(priv->parser, item, i_options,
+                                 cbs, cbs_userdata);
     return VLC_SUCCESS;
+}
+
+/**
+ * Cancels extraction of the meta data for an input item.
+ *
+ * This does nothing if the input item is already processed or if it was not
+ * added with libvlc_MetadataRequest()
+ */
+void libvlc_MetadataCancel(libvlc_int_t *libvlc, void *id)
+{
+    libvlc_priv_t *priv = libvlc_priv(libvlc);
+
+    if (unlikely(priv->parser == NULL))
+        return;
+
+    input_preparser_Cancel(priv->parser, id);
 }

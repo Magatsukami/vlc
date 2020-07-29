@@ -2,7 +2,6 @@
  * chrono.h: vout chrono
  *****************************************************************************
  * Copyright (C) 2009-2010 Laurent Aimar
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir _AT_ videolan _DOT_ org>
  *
@@ -24,18 +23,20 @@
 #ifndef LIBVLC_VOUT_CHRONO_H
 #define LIBVLC_VOUT_CHRONO_H
 
+#include <assert.h>
+
 typedef struct {
     int     shift;
-    mtime_t avg;
-    mtime_t avg_initial;
+    vlc_tick_t avg;
+    vlc_tick_t avg_initial;
 
     int     shift_var;
-    mtime_t var;
+    vlc_tick_t var;
 
-    mtime_t start;
+    vlc_tick_t start;
 } vout_chrono_t;
 
-static inline void vout_chrono_Init(vout_chrono_t *chrono, int shift, mtime_t avg_initial)
+static inline void vout_chrono_Init(vout_chrono_t *chrono, int shift, vlc_tick_t avg_initial)
 {
     chrono->shift       = shift;
     chrono->avg_initial =
@@ -44,7 +45,7 @@ static inline void vout_chrono_Init(vout_chrono_t *chrono, int shift, mtime_t av
     chrono->shift_var   = shift+1;
     chrono->var         = avg_initial / 2;
 
-    chrono->start = VLC_TS_INVALID;
+    chrono->start = VLC_TICK_INVALID;
 }
 static inline void vout_chrono_Clean(vout_chrono_t *chrono)
 {
@@ -52,24 +53,24 @@ static inline void vout_chrono_Clean(vout_chrono_t *chrono)
 }
 static inline void vout_chrono_Start(vout_chrono_t *chrono)
 {
-    chrono->start = mdate();
+    chrono->start = vlc_tick_now();
 }
-static inline mtime_t vout_chrono_GetHigh(vout_chrono_t *chrono)
+static inline vlc_tick_t vout_chrono_GetHigh(vout_chrono_t *chrono)
 {
     return chrono->avg + 2 * chrono->var;
 }
-static inline mtime_t vout_chrono_GetLow(vout_chrono_t *chrono)
+static inline vlc_tick_t vout_chrono_GetLow(vout_chrono_t *chrono)
 {
     return __MAX(chrono->avg - 2 * chrono->var, 0);
 }
 
 static inline void vout_chrono_Stop(vout_chrono_t *chrono)
 {
-    assert(chrono->start != VLC_TS_INVALID);
+    assert(chrono->start != VLC_TICK_INVALID);
 
     /* */
-    const mtime_t duration = mdate() - chrono->start;
-    const mtime_t var = llabs( duration - chrono->avg );
+    const vlc_tick_t duration = vlc_tick_now() - chrono->start;
+    const vlc_tick_t var = llabs( duration - chrono->avg );
 
     /* Update average only if the current point is 'valid' */
     if( duration < vout_chrono_GetHigh( chrono ) )
@@ -78,7 +79,7 @@ static inline void vout_chrono_Stop(vout_chrono_t *chrono)
     chrono->var = (((1 << chrono->shift_var) - 1) * chrono->var + var) >> chrono->shift_var;
 
     /* For assert */
-    chrono->start = VLC_TS_INVALID;
+    chrono->start = VLC_TICK_INVALID;
 }
 static inline void vout_chrono_Reset(vout_chrono_t *chrono)
 {

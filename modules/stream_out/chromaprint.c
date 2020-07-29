@@ -28,7 +28,6 @@
 
 #include <vlc_common.h>
 #include <vlc_plugin.h>
-#include <vlc_input.h>
 #include <vlc_block.h>
 #include <vlc_sout.h>
 
@@ -47,9 +46,9 @@
 static int      Open    ( vlc_object_t * );
 static void     Close   ( vlc_object_t * );
 
-static sout_stream_id_t *Add ( sout_stream_t *, es_format_t * );
-static int               Del ( sout_stream_t *, sout_stream_id_t * );
-static int               Send( sout_stream_t *, sout_stream_id_t *, block_t* );
+static void *Add( sout_stream_t *, const es_format_t * );
+static void  Del( sout_stream_t *, void * );
+static int   Send( sout_stream_t *, void *, block_t * );
 
 /*****************************************************************************
  * Module descriptor
@@ -59,13 +58,14 @@ static int               Send( sout_stream_t *, sout_stream_id_t *, block_t* );
 
 vlc_module_begin ()
     set_description( N_("Chromaprint stream output") )
-    set_capability( "sout stream", 0 )
+    set_capability( "sout output", 0 )
     add_shortcut( "chromaprint" )
     add_integer( "duration", 90, DURATION_TEXT, DURATION_LONGTEXT, true )
     set_callbacks( Open, Close )
 vlc_module_end ()
 
-struct sout_stream_sys_t
+typedef struct sout_stream_id_sys_t sout_stream_id_sys_t;
+typedef struct
 {
     unsigned int i_duration;
     unsigned int i_total_samples;
@@ -73,11 +73,11 @@ struct sout_stream_sys_t
     bool b_finished;
     bool b_done;
     ChromaprintContext *p_chromaprint_ctx;
-    sout_stream_id_t *id;
+    sout_stream_id_sys_t *id;
     chromaprint_fingerprint_t *p_data;
-};
+} sout_stream_sys_t;
 
-struct sout_stream_id_t
+struct sout_stream_id_sys_t
 {
     int i_samples;
     unsigned int i_channels;
@@ -160,10 +160,10 @@ static void Close( vlc_object_t * p_this )
     free( p_sys );
 }
 
-static sout_stream_id_t *Add( sout_stream_t *p_stream, es_format_t *p_fmt )
+static void *Add( sout_stream_t *p_stream, const es_format_t *p_fmt )
 {
     sout_stream_sys_t *p_sys = p_stream->p_sys;
-    sout_stream_id_t *id = NULL;
+    sout_stream_id_sys_t *id = NULL;
 
     if ( p_fmt->i_cat == AUDIO_ES && !p_sys->id )
     {
@@ -173,7 +173,7 @@ static sout_stream_id_t *Add( sout_stream_t *p_stream, es_format_t *p_fmt )
             goto error;
         }
 
-        id = malloc( sizeof( sout_stream_id_t ) );
+        id = malloc( sizeof( sout_stream_id_sys_t ) );
         if ( !id ) goto error;
 
         id->i_channels = p_fmt->audio.i_channels;
@@ -200,20 +200,19 @@ error:
     return NULL;
 }
 
-static int Del( sout_stream_t *p_stream, sout_stream_id_t *id )
+static void Del( sout_stream_t *p_stream, void *id )
 {
     sout_stream_sys_t *p_sys = p_stream->p_sys;
     Finish( p_stream );
     if ( p_sys->id == id ) /* not assuming only 1 id is in use.. */
         p_sys->id = NULL;
     free( id );
-    return VLC_SUCCESS;
 }
 
-static int Send( sout_stream_t *p_stream, sout_stream_id_t *id,
-                 block_t *p_buf )
+static int Send( sout_stream_t *p_stream, void *_id, block_t *p_buf )
 {
     sout_stream_sys_t *p_sys = p_stream->p_sys;
+    sout_stream_id_sys_t *id = (sout_stream_id_sys_t *)_id;
 
     if ( p_sys->id != id )
     {
@@ -230,7 +229,7 @@ static int Send( sout_stream_t *p_stream, sout_stream_id_t *id,
         if ( !p_sys->b_finished && id->i_samples > 0 && p_buf->i_buffer )
         {
             if(! chromaprint_feed( p_sys->p_chromaprint_ctx,
-                                   p_buf->p_buffer,
+                                   (int16_t *)p_buf->p_buffer,
                                    p_buf->i_buffer / BYTESPERSAMPLE ) )
                 msg_Warn( p_stream, "feed error" );
             id->i_samples -= i_samples;

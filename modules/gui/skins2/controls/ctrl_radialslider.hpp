@@ -2,7 +2,6 @@
  * ctrl_radialslider.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -58,7 +57,7 @@ public:
     virtual void draw( OSGraphics &rImage, int xDest, int yDest, int w, int h );
 
     /// Get the type of control (custom RTTI)
-    virtual string getType() const { return "radial_slider"; }
+    virtual std::string getType() const { return "radial_slider"; }
 
 private:
     /// Finite state machine of the control

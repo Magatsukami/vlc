@@ -2,7 +2,6 @@
  * evt_mouse.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -25,9 +24,9 @@
 #include "evt_mouse.hpp"
 
 
-const string EvtMouse::getAsString() const
+const std::string EvtMouse::getAsString() const
 {
-    string event = "mouse";
+    std::string event = "mouse";
 
     // Add the button
     if( m_button == kLeft )

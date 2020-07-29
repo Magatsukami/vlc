@@ -2,7 +2,6 @@
  * deprecated.h:  libvlc deprecated API
  *****************************************************************************
  * Copyright (C) 1998-2008 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Clément Stenac <zorglub@videolan.org>
  *          Jean-Paul Saman <jpsaman@videolan.org>
@@ -25,22 +24,79 @@
 #ifndef LIBVLC_DEPRECATED_H
 #define LIBVLC_DEPRECATED_H 1
 
-/**
- * \file
- * This file defines libvlc deprecated API
- */
-
 # ifdef __cplusplus
 extern "C" {
 # endif
 
-/*****************************************************************************
- * Playlist (Deprecated)
- *****************************************************************************/
-/** \defgroup libvlc_playlist LibVLC playlist (legacy)
+/**
+ * \ingroup libvlc libvlc_media
+ * @{
+ */
+
+/**
+ * Parse a media.
+ *
+ * This fetches (local) art, meta data and tracks information.
+ * The method is synchronous.
+ *
+ * \deprecated This function could block indefinitely.
+ *             Use libvlc_media_parse_with_options() instead
+ *
+ * \see libvlc_media_parse_with_options
+ * \see libvlc_media_get_meta
+ *
+ * \param p_md media descriptor object
+ */
+LIBVLC_DEPRECATED LIBVLC_API void
+libvlc_media_parse( libvlc_media_t *p_md );
+
+/**
+ * Parse a media.
+ *
+ * This fetches (local) art, meta data and tracks information.
+ * The method is the asynchronous of libvlc_media_parse().
+ *
+ * To track when this is over you can listen to libvlc_MediaParsedChanged
+ * event. However if the media was already parsed you will not receive this
+ * event.
+ *
+ * \deprecated You can't be sure to receive the libvlc_MediaParsedChanged
+ *             event (you can wait indefinitely for this event).
+ *             Use libvlc_media_parse_with_options() instead
+ *
+ * \see libvlc_media_parse
+ * \see libvlc_MediaParsedChanged
+ * \see libvlc_media_get_meta
+ *
+ * \param p_md media descriptor object
+ */
+LIBVLC_DEPRECATED LIBVLC_API void
+libvlc_media_parse_async( libvlc_media_t *p_md );
+
+/**
+ * Return true is the media descriptor object is parsed
+ *
+ * \deprecated This can return true in case of failure.
+ *             Use libvlc_media_get_parsed_status() instead
+ *
+ * \see libvlc_MediaParsedChanged
+ *
+ * \param p_md media descriptor object
+ * \retval true media object has been parsed
+ * \retval false otherwise
+ */
+LIBVLC_DEPRECATED LIBVLC_API bool
+   libvlc_media_is_parsed( libvlc_media_t *p_md );
+
+/** @}*/
+
+/**
  * \ingroup libvlc
+ * \defgroup libvlc_playlist LibVLC playlist (legacy)
  * @deprecated Use @ref libvlc_media_list instead.
  * @{
+ * \file
+ * LibVLC deprecated playlist API
  */
 
 /**
@@ -50,15 +106,9 @@ extern "C" {
  * item before it is played.
  *
  * \param p_instance the playlist instance
- * \param i_id the item to play. If this is a negative number, the next
- *        item will be selected. Otherwise, the item with the given ID will be
- *        played
- * \param i_options the number of options to add to the item
- * \param ppsz_options the options to add to the item
  */
 LIBVLC_DEPRECATED LIBVLC_API
-void libvlc_playlist_play( libvlc_instance_t *p_instance, int i_id,
-                           int i_options, char **ppsz_options );
+void libvlc_playlist_play( libvlc_instance_t *p_instance );
 
 /** @}*/
 

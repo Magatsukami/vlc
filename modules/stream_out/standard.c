@@ -2,7 +2,6 @@
  * standard.c: standard stream output module
  *****************************************************************************
  * Copyright (C) 2003-2011 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir@via.ecp.fr>
  *
@@ -34,6 +33,8 @@
 
 #include <vlc_network.h>
 #include <vlc_url.h>
+#include <vlc_memstream.h>
+#include "sdp_helper.h"
 
 /*****************************************************************************
  * Module descriptor
@@ -47,14 +48,14 @@
 #define DEST_TEXT N_("Output destination")
 #define DEST_LONGTEXT N_( \
     "Destination (URL) to use for the stream. Overrides path and bind parameters" )
-#define BIND_TEXT N_("address to bind to (helper setting for dst)")
+#define BIND_TEXT N_("Address to bind to (helper setting for dst)")
 #define BIND_LONGTEXT N_( \
-  "address:port to bind vlc to listening incoming streams "\
-  "helper setting for dst,dst=bind+'/'+path. dst-parameter overrides this" )
-#define PATH_TEXT N_("filename for stream (helper setting for dst)")
+  "address:port to bind vlc to listening incoming streams. "\
+  "Helper setting for dst, dst=bind+'/'+path. dst-parameter overrides this." )
+#define PATH_TEXT N_("Filename for stream (helper setting for dst)")
 #define PATH_LONGTEXT N_( \
-  "Filename for stream "\
-  "helper setting for dst, dst=bind+'/'+path, dst-parameter overrides this" )
+  "Filename for stream. "\
+  "Helper setting for dst, dst=bind+'/'+path. dst-parameter overrides this." )
 #define NAME_TEXT N_("Session name")
 #define NAME_LONGTEXT N_( \
     "This is the name of the session that will be announced in the SDP " \
@@ -63,21 +64,6 @@
 #define DESC_LONGTEXT N_( \
     "This allows you to give a short description with details about the stream, " \
     "that will be announced in the SDP (Session Descriptor)." )
-#define URL_TEXT N_("Session URL")
-#define URL_LONGTEXT N_( \
-    "This allows you to give a URL with more details about the stream " \
-    "(often the website of the streaming organization), that will " \
-    "be announced in the SDP (Session Descriptor)." )
-#define EMAIL_TEXT N_("Session email")
-#define EMAIL_LONGTEXT N_( \
-    "This allows you to give a contact mail address for the stream, that will " \
-    "be announced in the SDP (Session Descriptor)." )
-#define PHONE_TEXT N_("Session phone number")
-#define PHONE_LONGTEXT N_( \
-    "This allows you to give a contact telephone number for the stream, that will " \
-    "be announced in the SDP (Session Descriptor)." )
-
-
 #define SAP_TEXT N_("SAP announcing")
 #define SAP_LONGTEXT N_("Announce this session with SAP.")
 
@@ -86,11 +72,17 @@ static void     Close   ( vlc_object_t * );
 
 #define SOUT_CFG_PREFIX "sout-standard-"
 
+#ifdef ENABLE_SRT
+#define SRT_SHORTCUT "srt"
+#else
+#define SRT_SHORTCUT
+#endif
+
 vlc_module_begin ()
     set_shortname( N_("Standard"))
     set_description( N_("Standard stream output") )
-    set_capability( "sout stream", 50 )
-    add_shortcut( "standard", "std", "file", "http", "udp" )
+    set_capability( "sout output", 50 )
+    add_shortcut( "standard", "std", "file", "http", "udp", SRT_SHORTCUT )
     set_category( CAT_SOUT )
     set_subcategory( SUBCAT_SOUT_STREAM )
 
@@ -103,9 +95,9 @@ vlc_module_begin ()
     add_string( SOUT_CFG_PREFIX "name", "", NAME_TEXT, NAME_LONGTEXT, true )
     add_obsolete_string( SOUT_CFG_PREFIX "group" ) /* since 2.1.0 */
     add_string( SOUT_CFG_PREFIX "description", "", DESC_TEXT, DESC_LONGTEXT, true )
-    add_string( SOUT_CFG_PREFIX "url", "", URL_TEXT, URL_LONGTEXT, true )
-    add_string( SOUT_CFG_PREFIX "email", "", EMAIL_TEXT, EMAIL_LONGTEXT, true )
-    add_string( SOUT_CFG_PREFIX "phone", "", PHONE_TEXT, PHONE_LONGTEXT, true )
+    add_obsolete_string( SOUT_CFG_PREFIX "url" ) /* since 4.0.0 */
+    add_obsolete_string( SOUT_CFG_PREFIX "email" ) /* since 4.0.0 */
+    add_obsolete_string( SOUT_CFG_PREFIX "phone" ) /* since 3.0.0 */
 
     set_callbacks( Open, Close )
 vlc_module_end ()
@@ -116,39 +108,42 @@ vlc_module_end ()
  *****************************************************************************/
 static const char *const ppsz_sout_options[] = {
     "access", "mux", "url", "dst",
-    "sap", "name", "description", "url", "email", "phone",
+    "sap", "name", "description",
     "bind", "path", NULL
 };
 
 #define DEFAULT_PORT 1234
 
-struct sout_stream_sys_t
+typedef struct
 {
     sout_mux_t           *p_mux;
     session_descriptor_t *p_session;
-};
+} sout_stream_sys_t;
 
-struct sout_stream_id_t
+static void *Add( sout_stream_t *p_stream, const es_format_t *p_fmt )
 {
-};
-
-static sout_stream_id_t * Add( sout_stream_t *p_stream, es_format_t *p_fmt )
-{
-    return (sout_stream_id_t*)sout_MuxAddStream( p_stream->p_sys->p_mux, p_fmt );
+    sout_stream_sys_t *p_sys = p_stream->p_sys;
+    return sout_MuxAddStream( p_sys->p_mux, p_fmt );
 }
 
-static int Del( sout_stream_t *p_stream, sout_stream_id_t *id )
+static void Del( sout_stream_t *p_stream, void *id )
 {
-    sout_MuxDeleteStream( p_stream->p_sys->p_mux, (sout_input_t*)id );
-    return VLC_SUCCESS;
+    sout_stream_sys_t *p_sys = p_stream->p_sys;
+    sout_MuxDeleteStream( p_sys->p_mux, (sout_input_t*)id );
 }
 
-static int Send( sout_stream_t *p_stream, sout_stream_id_t *id,
-                 block_t *p_buffer )
+static int Send( sout_stream_t *p_stream, void *id, block_t *p_buffer )
 {
-    sout_MuxSendBuffer( p_stream->p_sys->p_mux, (sout_input_t*)id, p_buffer );
-    return VLC_SUCCESS;
+    sout_stream_sys_t *p_sys = p_stream->p_sys;
+    return sout_MuxSendBuffer( p_sys->p_mux, (sout_input_t*)id, p_buffer );
 }
+
+static void Flush( sout_stream_t *p_stream, void *id )
+{
+    sout_stream_sys_t *p_sys = p_stream->p_sys;
+    sout_MuxFlush( p_sys->p_mux, (sout_input_t*)id );
+}
+
 static void create_SDP(sout_stream_t *p_stream, sout_access_out_t *p_access)
 {
     sout_stream_sys_t   *p_sys = p_stream->p_sys;
@@ -179,29 +174,25 @@ static void create_SDP(sout_stream_t *p_stream, sout_access_out_t *p_access)
         freeaddrinfo (res);
     }
 
-    char *head = vlc_sdp_Start (VLC_OBJECT (p_stream), SOUT_CFG_PREFIX,
-            (struct sockaddr *)&src, srclen,
-            (struct sockaddr *)&dst, dstlen);
-    free (shost);
+    struct vlc_memstream sdp;
 
-    if (head != NULL)
+    if (vlc_sdp_Start(&sdp, VLC_OBJECT (p_stream), SOUT_CFG_PREFIX,
+                      (struct sockaddr *)&src, srclen,
+                      (struct sockaddr *)&dst, dstlen) == 0)
     {
-        char *psz_sdp = NULL;
-        if (asprintf (&psz_sdp, "%s"
-                    "m=video %d udp mpeg\r\n", head, dport) == -1)
-            psz_sdp = NULL;
-        free (head);
+        vlc_memstream_printf(&sdp, "m=video %d udp mpeg\r\n", dport);
 
         /* Register the SDP with the SAP thread */
-        if (psz_sdp)
+        if (vlc_memstream_close(&sdp) == 0)
         {
-            msg_Dbg (p_stream, "Generated SDP:\n%s", psz_sdp);
+            msg_Dbg(p_stream, "Generated SDP:\n%s", sdp.ptr);
             p_sys->p_session =
-                sout_AnnounceRegisterSDP (p_stream, psz_sdp, dhost);
-            free( psz_sdp );
+                sout_AnnounceRegisterSDP(p_stream, sdp.ptr, dhost);
+            free(sdp.ptr);
         }
     }
-    free (dhost);
+    free(shost);
+    free(dhost);
 }
 
 static const char *getMuxFromAlias( const char *psz_alias )
@@ -293,24 +284,33 @@ static int fixAccessMux( sout_stream_t *p_stream, char **ppsz_mux,
     return 0;
 }
 
+static bool exactMatch( const char *psz_target, const char *psz_string,
+                        size_t i_len )
+{
+    if ( strncmp( psz_target, psz_string, i_len ) )
+        return false;
+    else
+        return ( psz_target[i_len] < 'a' || psz_target[i_len] > 'z' );
+}
+
 static void checkAccessMux( sout_stream_t *p_stream, char *psz_access,
                             char *psz_mux )
 {
-    if( !strncmp( psz_access, "mmsh", 4 ) && strncmp( psz_mux, "asfh", 4 ) )
+    if( exactMatch( psz_access, "mmsh", 4 ) && !exactMatch( psz_mux, "asfh", 4 ) )
         msg_Err( p_stream, "mmsh output is only valid with asfh mux" );
-    else if( strncmp( psz_access, "file", 4 ) &&
-            ( !strncmp( psz_mux, "mov", 3 ) || !strncmp( psz_mux, "mp4", 3 ) ) )
+    else if( !exactMatch( psz_access, "file", 4 ) &&
+             ( exactMatch( psz_mux, "mov", 3 ) || exactMatch( psz_mux, "mp4", 3 ) ) )
         msg_Err( p_stream, "mov and mp4 mux are only valid with file output" );
-    else if( !strncmp( psz_access, "udp", 3 ) )
+    else if( exactMatch( psz_access, "udp", 3 ) )
     {
-        if( !strncmp( psz_mux, "ffmpeg", 6 ) || !strncmp( psz_mux, "avformat", 8 ) )
+        if( exactMatch( psz_mux, "ffmpeg", 6 ) || exactMatch( psz_mux, "avformat", 8 ) )
         {   /* why would you use ffmpeg's ts muxer ? YOU DON'T LOVE VLC ??? */
             char *psz_ffmpeg_mux = var_CreateGetString( p_stream, "sout-avformat-mux" );
             if( !psz_ffmpeg_mux || strncmp( psz_ffmpeg_mux, "mpegts", 6 ) )
                 msg_Err( p_stream, "UDP output is only valid with TS mux" );
             free( psz_ffmpeg_mux );
         }
-        else if( strncmp( psz_mux, "ts", 2 ) )
+        else if( !exactMatch( psz_mux, "ts", 2 ) )
             msg_Err( p_stream, "UDP output is only valid with TS mux" );
     }
 }
@@ -375,7 +375,7 @@ static int Open( vlc_object_t *p_this )
         goto end;
     }
 
-    p_sys->p_mux = sout_MuxNew( p_stream->p_sout, psz_mux, p_access );
+    p_sys->p_mux = sout_MuxNew( p_access, psz_mux );
     if( !p_sys->p_mux )
     {
         const char *psz_mux_guess = getMuxFromAlias( psz_mux );
@@ -383,7 +383,7 @@ static int Open( vlc_object_t *p_this )
         {
             msg_Dbg( p_stream, "Couldn't open mux `%s', trying `%s' instead",
                 psz_mux, psz_mux_guess );
-            p_sys->p_mux = sout_MuxNew( p_stream->p_sout, psz_mux_guess, p_access );
+            p_sys->p_mux = sout_MuxNew( p_access, psz_mux_guess );
         }
 
         if( !p_sys->p_mux )
@@ -402,6 +402,7 @@ static int Open( vlc_object_t *p_this )
     p_stream->pf_add    = Add;
     p_stream->pf_del    = Del;
     p_stream->pf_send   = Send;
+    p_stream->pf_flush  = Flush;
     if( !sout_AccessOutCanControlPace( p_access ) )
         p_stream->pace_nocontrol = true;
 

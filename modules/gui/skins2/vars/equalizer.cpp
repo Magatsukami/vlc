@@ -2,7 +2,6 @@
  * equalizer.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *
@@ -26,8 +25,6 @@
 #endif
 
 #include <vlc_common.h>
-#include <vlc_playlist.h>
-#include <vlc_input.h>
 #include <vlc_aout.h>
 #include "equalizer.hpp"
 #include "../utils/var_percent.hpp"
@@ -58,10 +55,10 @@ EqualizerBands::~EqualizerBands()
 }
 
 
-void EqualizerBands::set( string bands )
+void EqualizerBands::set( std::string bands )
 {
-    float val;
-    stringstream ss( bands );
+    float val = 0.0f;
+    std::stringstream ss( bands );
 
     m_isUpdating = true;
     // Parse the string
@@ -84,16 +81,16 @@ VariablePtr EqualizerBands::getBand( int band )
 void EqualizerBands::onUpdate( Subject<VarPercent> &rBand, void *arg )
 {
     (void)rBand; (void)arg;
-    playlist_t *pPlaylist = getIntf()->p_sys->p_playlist;
-    audio_output_t *pAout = playlist_GetAout( pPlaylist );
+    vlc_player_t* player = vlc_playlist_GetPlayer( getPL() );
+    audio_output_t* pAout = vlc_player_aout_Hold( player );
 
     // Make sure we are not called from set()
-    if (!m_isUpdating)
+    if( !m_isUpdating )
     {
         float val;
-        stringstream ss;
+        std::stringstream ss;
         // Write one digit after the floating point
-        ss << setprecision( 1 ) << setiosflags( ios::fixed );
+        ss << std::setprecision( 1 ) << std::setiosflags( std::ios::fixed );
 
         // Convert the band values to a string
         val = 40 * ((VarPercent*)m_cBands[0].get())->get() - 20;
@@ -104,9 +101,9 @@ void EqualizerBands::onUpdate( Subject<VarPercent> &rBand, void *arg )
             ss << " " << val;
         }
 
-        string bands = ss.str();
+        std::string bands = ss.str();
 
-        config_PutPsz( getIntf(), "equalizer-bands", bands.c_str() );
+        config_PutPsz( "equalizer-bands", bands.c_str() );
         if( pAout )
         {
             // Update the audio output
@@ -115,7 +112,7 @@ void EqualizerBands::onUpdate( Subject<VarPercent> &rBand, void *arg )
     }
 
     if( pAout )
-        vlc_object_release( pAout );
+        aout_Release( pAout );
 }
 
 
@@ -128,8 +125,8 @@ EqualizerPreamp::EqualizerPreamp( intf_thread_t *pIntf ): VarPercent( pIntf )
 
 void EqualizerPreamp::set( float percentage, bool updateVLC )
 {
-    playlist_t *pPlaylist = getIntf()->p_sys->p_playlist;
-    audio_output_t *pAout = playlist_GetAout( pPlaylist );
+    vlc_player_t* player = vlc_playlist_GetPlayer( getPL() );
+    audio_output_t* pAout = vlc_player_aout_Hold( player );
 
     VarPercent::set( percentage );
 
@@ -138,7 +135,7 @@ void EqualizerPreamp::set( float percentage, bool updateVLC )
     {
         float val = 40 * percentage - 20;
 
-        config_PutFloat( getIntf(), "equalizer-preamp", val );
+        config_PutFloat( "equalizer-preamp", val );
         if( pAout )
         {
             // Update the audio output
@@ -147,5 +144,5 @@ void EqualizerPreamp::set( float percentage, bool updateVLC )
     }
 
     if( pAout )
-        vlc_object_release( pAout );
+        aout_Release( pAout );
 }

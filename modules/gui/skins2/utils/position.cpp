@@ -2,7 +2,6 @@
  * position.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -25,7 +24,7 @@
 #include "position.hpp"
 
 
-const string VarBox::m_type = "box";
+const std::string VarBox::m_type = "box";
 
 
 SkinsRect::SkinsRect( int left, int top, int right, int bottom ):
@@ -123,11 +122,9 @@ int Position::getLeft() const
         case kLeftTop:
         case kLeftBottom:
             return m_rRect.getLeft() + m_left;
-            break;
         case kRightTop:
         case kRightBottom:
             return m_rRect.getLeft() + m_rRect.getWidth() + m_left - 1;
-            break;
         }
         // Avoid a warning
         return 0;
@@ -151,11 +148,9 @@ int Position::getTop() const
             case kLeftTop:
             case kRightTop:
                 return m_rRect.getTop() + m_top;
-                break;
             case kRightBottom:
             case kLeftBottom:
                 return m_rRect.getTop() + m_rRect.getHeight() + m_top - 1;
-                break;
         }
         // Avoid a warning
         return 0;
@@ -179,11 +174,9 @@ int Position::getRight() const
             case kLeftTop:
             case kLeftBottom:
                 return m_rRect.getLeft() + m_right;
-                break;
             case kRightTop:
             case kRightBottom:
                 return m_rRect.getLeft() + m_rRect.getWidth() + m_right - 1;
-                break;
         }
         // Avoid a warning
         return 0;
@@ -207,11 +200,9 @@ int Position::getBottom() const
             case kLeftTop:
             case kRightTop:
                 return m_rRect.getTop() + m_bottom;
-                break;
             case kLeftBottom:
             case kRightBottom:
                 return m_rRect.getTop() + m_rRect.getHeight() + m_bottom - 1;
-                break;
         }
         // Avoid a warning
         return 0;

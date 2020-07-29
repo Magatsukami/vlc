@@ -2,7 +2,6 @@
  * grain.c: add film grain
  *****************************************************************************
  * Copyright (C) 2010 Laurent Aimar
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir _AT_ videolan _DOT_ org>
  *
@@ -35,7 +34,7 @@
 #include <vlc_plugin.h>
 #include <vlc_filter.h>
 #include <vlc_cpu.h>
-
+#include <vlc_picture.h>
 #include <vlc_rand.h>
 
 /*****************************************************************************
@@ -64,7 +63,7 @@ vlc_module_begin()
     set_description(N_("Grain video filter"))
     set_shortname( N_("Grain"))
     set_help(N_("Adds filtered gaussian noise"))
-    set_capability( "video filter2", 0 )
+    set_capability( "video filter", 0 )
     set_category(CAT_VIDEO)
     set_subcategory(SUBCAT_VIDEO_VFILTER)
     add_float_with_range(CFG_PREFIX "variance", 2.0, VARIANCE_MIN, VARIANCE_MAX,
@@ -81,7 +80,8 @@ vlc_module_end()
  *****************************************************************************/
 
 #define BLEND_SIZE (8)
-struct filter_sys_t {
+typedef struct
+{
     bool     is_uv_filtered;
     uint32_t seed;
 
@@ -99,7 +99,7 @@ struct filter_sys_t {
         vlc_mutex_t lock;
         double      variance;
     } cfg;
-};
+} filter_sys_t;
 
 /* Simple and *really fast* RNG (xorshift[13,17,5])*/
 #define URAND_SEED (2463534242)
@@ -154,8 +154,8 @@ static void BlockBlendC(uint8_t *dst, size_t dst_pitch,
 }
 
 #ifdef CAN_COMPILE_SSE2
-#define _STRING(x) #x
-#define STRING(x) _STRING(x)
+#define STRING_EXPAND(x) #x
+#define STRING(x) STRING_EXPAND(x)
 VLC_SSE
 static void BlockBlendSse2(uint8_t *dst, size_t dst_pitch,
                            const uint8_t *src, size_t src_pitch,
@@ -334,7 +334,7 @@ static int Generate(int16_t *bank, int h_min, int h_max, int v_min, int v_max)
         }
     }
 
-    //mtime_t tmul_0 = mdate();
+    //vlc_tick_t tmul_0 = vlc_tick_now();
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
             double v = 0.0;
@@ -357,7 +357,7 @@ static int Generate(int16_t *bank, int h_min, int h_max, int v_min, int v_max)
             bank[i * N + j] = VLC_CLIP(vq, INT16_MIN, INT16_MAX);
         }
     }
-    //mtime_t mul_duration = mdate() - tmul_0;
+    //vlc_tick_t mul_duration = vlc_tick_now() - tmul_0;
     //fprintf(stderr, "IDCT took %d ms\n", (int)(mul_duration / 1000));
 
     free(workspace);
@@ -430,7 +430,6 @@ static void Close(vlc_object_t *object)
     filter_sys_t *sys    = filter->p_sys;
 
     var_DelCallback(filter, CFG_PREFIX "variance", Callback, NULL);
-    vlc_mutex_destroy(&sys->cfg.lock);
     free(sys);
 }
 

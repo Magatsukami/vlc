@@ -2,7 +2,6 @@
  * blend2.cpp: Blend one picture with alpha onto another picture
  *****************************************************************************
  * Copyright (C) 2012 Laurent Aimar
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir _AT_ videolan _DOT_ org>
  *
@@ -28,10 +27,10 @@
 # include "config.h"
 #endif
 
-#include <assert.h>
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_filter.h>
+#include <vlc_picture.h>
 #include "filter_picture.h"
 
 /*****************************************************************************
@@ -59,6 +58,8 @@ void merge(T *dst, unsigned src, unsigned f)
 {
     *dst = div255((255 - f) * (*dst) + src * f);
 }
+
+namespace {
 
 struct CPixel {
     unsigned i, j, k;
@@ -145,8 +146,8 @@ private:
     {
         if (plane == 1 || plane == 2)
             return (pixel*)&data[plane][(x + dx) / rx * sizeof(pixel)];
-        else
-            return (pixel*)&data[plane][(x + dx) /  1 * sizeof(pixel)];
+
+        return (pixel*)&data[plane][(x + dx) /  1 * sizeof(pixel)];
     }
     uint8_t *data[4];
 };
@@ -268,20 +269,23 @@ public:
     CPictureRGBX(const CPicture &cfg) : CPicture(cfg)
     {
         if (has_alpha) {
-            offset_r = 0;
-            offset_g = 1;
-            offset_b = 2;
+            if (fmt->i_chroma == VLC_CODEC_BGRA) {
+                offset_r = 2;
+                offset_g = 1;
+                offset_b = 0;
+            } else {
+                offset_r = 0;
+                offset_g = 1;
+                offset_b = 2;
+            }
             offset_a = 3;
         } else {
-#ifdef WORDS_BIGENDIAN
-            offset_r = (8 * bytes - fmt->i_lrshift) / 8;
-            offset_g = (8 * bytes - fmt->i_lgshift) / 8;
-            offset_b = (8 * bytes - fmt->i_lbshift) / 8;
-#else
-            offset_r = fmt->i_lrshift / 8;
-            offset_g = fmt->i_lgshift / 8;
-            offset_b = fmt->i_lbshift / 8;
-#endif
+            if (GetPackedRgbIndexes(fmt, &offset_r, &offset_g, &offset_b) != VLC_SUCCESS) {
+                /* at least init to something on error to silence compiler warnings */
+                offset_r = 0;
+                offset_g = 1;
+                offset_b = 2;
+            }
         }
         data = CPicture::getLine<1>(0);
     }
@@ -331,25 +335,30 @@ private:
     {
         return &data[(x + dx) * bytes];
     }
-    unsigned offset_r;
-    unsigned offset_g;
-    unsigned offset_b;
+    int offset_r;
+    int offset_g;
+    int offset_b;
     unsigned offset_a;
     uint8_t *data;
 };
 
 class CPictureRGB16 : public CPicture {
+private:
+    unsigned rshift, gshift, bshift;
 public:
     CPictureRGB16(const CPicture &cfg) : CPicture(cfg)
     {
         data = CPicture::getLine<1>(0);
+        rshift = vlc_ctz(fmt->i_rmask);
+        gshift = vlc_ctz(fmt->i_gmask);
+        bshift = vlc_ctz(fmt->i_bmask);
     }
     void get(CPixel *px, unsigned dx, bool = true) const
     {
         const uint16_t data = *getPointer(dx);
-        px->i = (data & fmt->i_rmask) >> fmt->i_lrshift;
-        px->j = (data & fmt->i_gmask) >> fmt->i_lgshift;
-        px->k = (data & fmt->i_bmask) >> fmt->i_lbshift;
+        px->i = (data & fmt->i_rmask) >> rshift;
+        px->j = (data & fmt->i_gmask) >> gshift;
+        px->k = (data & fmt->i_bmask) >> bshift;
     }
     void merge(unsigned dx, const CPixel &spx, unsigned a, bool full)
     {
@@ -360,9 +369,9 @@ public:
         ::merge(&dpx.j, spx.j, a);
         ::merge(&dpx.k, spx.k, a);
 
-        *getPointer(dx) = (dpx.i << fmt->i_lrshift) |
-                          (dpx.j << fmt->i_lgshift) |
-                          (dpx.k << fmt->i_lbshift);
+        *getPointer(dx) = (dpx.i << rshift) |
+                          (dpx.j << gshift) |
+                          (dpx.k << bshift);
     }
     void nextLine()
     {
@@ -403,6 +412,7 @@ typedef CPictureYUVPacked<0, 3, 1> CPictureYVYU;
 typedef CPictureYUVPacked<1, 2, 0> CPictureVYUY;
 
 typedef CPictureRGBX<4, true>  CPictureRGBA;
+typedef CPictureRGBX<4, true>  CPictureBGRA;
 typedef CPictureRGBX<4, false> CPictureRGB32;
 typedef CPictureRGBX<3, false> CPictureRGB24;
 
@@ -425,6 +435,7 @@ struct convertBits {
 };
 typedef convertBits< 9, 8> convert8To9Bits;
 typedef convertBits<10, 8> convert8To10Bits;
+typedef convertBits<16, 8> convert8To16Bits;
 
 struct convertRgbToYuv8 {
     convertRgbToYuv8(const video_format_t *, const video_format_t *) {}
@@ -451,15 +462,20 @@ struct convertYuv8ToRgb {
 };
 
 struct convertRgbToRgbSmall {
-    convertRgbToRgbSmall(const video_format_t *dst, const video_format_t *) : fmt(*dst) {}
+    convertRgbToRgbSmall(const video_format_t *dst, const video_format_t *)
+    {
+        rshift = 8 - vlc_popcount(dst->i_rmask);
+        bshift = 8 - vlc_popcount(dst->i_bmask);
+        gshift = 8 - vlc_popcount(dst->i_gmask);
+    }
     void operator()(CPixel &p)
     {
-        p.i >>= fmt.i_rrshift;
-        p.j >>= fmt.i_rgshift;
-        p.k >>= fmt.i_rbshift;
+        p.i >>= rshift;
+        p.j >>= gshift;
+        p.k >>= bshift;
     }
 private:
-    const video_format_t &fmt;
+    unsigned rshift, gshift, bshift;
 };
 
 struct convertYuvpToAny {
@@ -511,6 +527,8 @@ private:
     G g;
 };
 
+} // namespace
+
 template <class TDst, class TSrc, class TConvert>
 void Blend(const CPicture &dst_data, const CPicture &src_data,
            unsigned width, unsigned height, int alpha)
@@ -543,6 +561,8 @@ void Blend(const CPicture &dst_data, const CPicture &src_data,
 typedef void (*blend_function_t)(const CPicture &dst_data, const CPicture &src_data,
                                  unsigned width, unsigned height, int alpha);
 
+namespace {
+
 static const struct {
     vlc_fourcc_t     dst;
     vlc_fourcc_t     src;
@@ -564,6 +584,7 @@ static const struct {
     RGB(VLC_CODEC_RGB24,    CPictureRGB24,    convertNone),
     RGB(VLC_CODEC_RGB32,    CPictureRGB32,    convertNone),
     RGB(VLC_CODEC_RGBA,     CPictureRGBA,     convertNone),
+    RGB(VLC_CODEC_BGRA,     CPictureBGRA,     convertNone),
 
     YUV(VLC_CODEC_YV9,      CPictureYV9,      convertNone),
     YUV(VLC_CODEC_I410,     CPictureI410_8,   convertNone),
@@ -588,9 +609,11 @@ static const struct {
 #ifdef WORDS_BIGENDIAN
     YUV(VLC_CODEC_I422_9B,  CPictureI422_16,  convert8To9Bits),
     YUV(VLC_CODEC_I422_10B, CPictureI422_16,  convert8To10Bits),
+    YUV(VLC_CODEC_I422_16B, CPictureI422_16,  convert8To16Bits),
 #else
     YUV(VLC_CODEC_I422_9L,  CPictureI422_16,  convert8To9Bits),
     YUV(VLC_CODEC_I422_10L, CPictureI422_16,  convert8To10Bits),
+    YUV(VLC_CODEC_I422_16L, CPictureI422_16,  convert8To16Bits),
 #endif
 
     YUV(VLC_CODEC_J444,     CPictureI444_8,   convertNone),
@@ -598,9 +621,11 @@ static const struct {
 #ifdef WORDS_BIGENDIAN
     YUV(VLC_CODEC_I444_9B,  CPictureI444_16,  convert8To9Bits),
     YUV(VLC_CODEC_I444_10B, CPictureI444_16,  convert8To10Bits),
+    YUV(VLC_CODEC_I444_16B, CPictureI444_16,  convert8To16Bits),
 #else
     YUV(VLC_CODEC_I444_9L,  CPictureI444_16,  convert8To9Bits),
     YUV(VLC_CODEC_I444_10L, CPictureI444_16,  convert8To10Bits),
+    YUV(VLC_CODEC_I444_16L, CPictureI444_16,  convert8To16Bits),
 #endif
 
     YUV(VLC_CODEC_YUYV,     CPictureYUYV,     convertNone),
@@ -619,6 +644,8 @@ struct filter_sys_t {
     blend_function_t blend;
 };
 
+} // namespace
+
 /**
  * It blends 2 picture together.
  */
@@ -626,7 +653,7 @@ static void Blend(filter_t *filter,
                   picture_t *dst, const picture_t *src,
                   int x_offset, int y_offset, int alpha)
 {
-    filter_sys_t *sys = filter->p_sys;
+    filter_sys_t *sys = reinterpret_cast<filter_sys_t *>( filter->p_sys );
 
     if( x_offset < 0 || y_offset < 0 )
     {
@@ -680,6 +707,7 @@ static int Open(vlc_object_t *object)
 static void Close(vlc_object_t *object)
 {
     filter_t *filter = (filter_t *)object;
-    delete filter->p_sys;
+    filter_sys_t *p_sys = reinterpret_cast<filter_sys_t *>( filter->p_sys );
+    delete p_sys;
 }
 

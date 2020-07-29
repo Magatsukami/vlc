@@ -3,7 +3,6 @@
  *****************************************************************************
  * Copyright (C) 2005-2009 VLC authors and VideoLAN
  * Copyright (C) 2013      Vianney Boyer
- * $Id$
  *
  * Authors: Antoine Cellerier <dionoea -at- videolan -dot- org>
  *          Vianney Boyer <vlcvboyer -at- gmail -dot- com>
@@ -35,6 +34,7 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_filter.h>
+#include <vlc_picture.h>
 #include <vlc_rand.h>
 
 #include "filter_picture.h"

@@ -19,7 +19,11 @@
  * along with this program; if not, write to the Free Software Foundation,
  * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
  *****************************************************************************/
+#ifndef VLC_ASF_LIBASF_H_
+#define VLC_ASF_LIBASF_H_
 
+#define ASF_MAX_STREAMNUMBER 127
+#define ASF_OBJECT_COMMON_SIZE 24
 
 /*****************************************************************************
  * Structure needed for decoder
@@ -29,7 +33,7 @@
 
 #define ASF_OBJECT_COMMON          \
     int          i_type;           \
-    guid_t       i_object_id;      \
+    vlc_guid_t       i_object_id;      \
     uint64_t     i_object_size;    \
     uint64_t     i_object_pos;     \
     union asf_object_u *p_father;  \
@@ -67,7 +71,7 @@ typedef struct
 typedef struct
 {
     ASF_OBJECT_COMMON
-    guid_t      i_file_id;
+    vlc_guid_t      i_file_id;
     uint64_t    i_total_data_packets;
     uint16_t    i_reserved;
 
@@ -77,8 +81,8 @@ typedef struct
 typedef struct
 {
     ASF_OBJECT_COMMON
-    guid_t      i_file_id;
-    uint64_t    i_index_entry_time_interval;
+    vlc_guid_t      i_file_id;
+    msftime_t   i_index_entry_time_interval;
     uint32_t    i_max_packet_count;
     uint32_t    i_index_entry_count;
 
@@ -96,13 +100,13 @@ typedef struct
 {
     ASF_OBJECT_COMMON
 
-    guid_t  i_file_id;
+    vlc_guid_t  i_file_id;
     uint64_t     i_file_size;
     uint64_t     i_creation_date;
     uint64_t     i_data_packets_count;
-    uint64_t     i_play_duration;
-    uint64_t     i_send_duration;
-    uint64_t     i_preroll;
+    msftime_t    i_play_duration;
+    msftime_t    i_send_duration;
+    vlc_tick_t   i_preroll;
     uint32_t     i_flags;
     uint32_t     i_min_data_packet_size;
     uint32_t     i_max_data_packet_size;
@@ -115,9 +119,9 @@ typedef struct
 {
     ASF_OBJECT_COMMON
 
-    guid_t  i_stream_type;
-    guid_t  i_error_correction_type;
-    uint64_t     i_time_offset;
+    vlc_guid_t  i_stream_type;
+    vlc_guid_t  i_error_correction_type;
+    msftime_t    i_time_offset;
     uint32_t     i_type_specific_data_length;
     uint32_t     i_error_correction_data_length;
     uint16_t     i_flags;
@@ -132,7 +136,7 @@ typedef struct
 {
     ASF_OBJECT_COMMON
 
-    guid_t      i_reserved1;
+    vlc_guid_t      i_reserved1;
     uint16_t    i_reserved2;
     uint32_t    i_header_extension_size;
     uint8_t     *p_header_extension_data;
@@ -185,7 +189,7 @@ typedef struct
 #define ASF_CODEC_TYPE_AUDIO    0x0002
 #define ASF_CODEC_TYPE_UNKNOWN  0xffff
 
-typedef struct
+typedef struct asf_codec_entry
 {
     uint16_t    i_type;
     char        *psz_name;
@@ -193,14 +197,15 @@ typedef struct
 
     uint16_t    i_information_length;
     uint8_t     *p_information;
+
+    struct asf_codec_entry *p_next;
 } asf_codec_entry_t;
 
 typedef struct
 {
     ASF_OBJECT_COMMON
-    guid_t      i_reserved;
-    uint32_t    i_codec_entries_count;
-    asf_codec_entry_t *codec;
+    vlc_guid_t      i_reserved;
+    asf_codec_entry_t *codecs;
 
 } asf_object_codec_list_t;
 
@@ -219,7 +224,7 @@ typedef struct
 typedef struct
 {
     ASF_OBJECT_COMMON
-    guid_t      i_reserved1;
+    vlc_guid_t      i_reserved1;
     uint32_t    i_count;
     uint16_t    i_reserved2;
     char        *name;
@@ -244,13 +249,13 @@ typedef struct
     {
         uint8_t  i_stream_number;
         uint32_t i_avg_bitrate;
-    } bitrate[128];
+    } bitrate[ASF_MAX_STREAMNUMBER + 1];
 } asf_object_stream_bitrate_properties_t;
 
 
 typedef struct
 {
-    guid_t   i_extension_id;
+    vlc_guid_t   i_extension_id;
     uint16_t i_data_size;
     uint32_t i_info_length;
     char     *pi_info;
@@ -276,7 +281,7 @@ typedef struct
     uint32_t i_flags;
     uint16_t i_stream_number;
     uint16_t i_language_index;
-    uint64_t i_average_time_per_frame;
+    msftime_t i_average_time_per_frame;
 
     uint16_t i_stream_name_count;
 
@@ -384,6 +389,7 @@ typedef union asf_object_u
 asf_object_root_t *ASF_ReadObjectRoot( stream_t *, int b_seekable );
 void               ASF_FreeObjectRoot( stream_t *, asf_object_root_t *p_root );
 
-int ASF_CountObject ( void *p_obj, const guid_t *p_guid );
+int ASF_CountObject ( void *p_obj, const vlc_guid_t *p_guid );
 
-void *ASF_FindObject( void *p_obj, const guid_t *p_guid, int i_number );
+void *ASF_FindObject( void *p_obj, const vlc_guid_t *p_guid, int i_number );
+#endif

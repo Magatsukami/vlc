@@ -30,14 +30,18 @@
 #include <vlc_plugin.h>
 #include <vlc_modules.h>
 #include <vlc_stream.h>
+#include <vlc_stream_extractor.h>
 #include <vlc_addons.h>
 #include <vlc_fs.h>
 #include <vlc_strings.h>
 #include <vlc_xml.h>
+#include <vlc_url.h>
 #include "xmlreading.h"
 
 #include <sys/stat.h>
 #include <errno.h>
+
+#include <unistd.h>     // getpid()
 
 /*****************************************************************************
  * Local prototypes
@@ -50,11 +54,13 @@
 static struct
 {
     addon_type_t t;
-    const char const * psz_dir;
+    const char * const psz_dir;
 } const addons_dirs[] = {
     { ADDON_EXTENSION,           ADDONS_SCRIPTS_DIR DIR_SEP "extensions" },
     { ADDON_PLAYLIST_PARSER,     ADDONS_SCRIPTS_DIR DIR_SEP "playlist" },
     { ADDON_SERVICE_DISCOVERY,   ADDONS_SCRIPTS_DIR DIR_SEP "sd" },
+    { ADDON_INTERFACE,           ADDONS_SCRIPTS_DIR DIR_SEP "intf" },
+    { ADDON_META,                ADDONS_SCRIPTS_DIR DIR_SEP "meta" },
     { ADDON_SKIN2,               ADDONS_DIR DIR_SEP "skins2" },
 };
 
@@ -64,6 +70,9 @@ static int   OpenLister ( vlc_object_t * );
 static void  CloseLister ( vlc_object_t * );
 
 static int   LoadCatalog ( addons_finder_t * );
+static bool  FileBelongsToManagedAddon( addons_finder_t *p_finder,
+                                        const addon_type_t e_type,
+                                        const char *psz_file );
 /*****************************************************************************
  * Module descriptor
  ****************************************************************************/
@@ -91,7 +100,7 @@ static char * getAddonInstallDir( addon_type_t t )
 {
     const char *psz_subdir = NULL;
     char *psz_dir;
-    char *psz_userdir = config_GetUserDir( VLC_DATA_DIR );
+    char *psz_userdir = config_GetUserDir( VLC_USERDATA_DIR );
     if ( !psz_userdir ) return NULL;
 
     for ( unsigned int i=0; i< ARRAY_SIZE(addons_dirs); i++ )
@@ -208,13 +217,19 @@ static int ListSkins( addons_finder_t *p_finder )
         if( !psz_file )
             break;
 
+        if ( FileBelongsToManagedAddon( p_finder, ADDON_SKIN2, psz_file ) )
+        {
+            free( psz_file );
+             continue;
+        }
+
         char *psz_uri;
-        if( asprintf( &psz_uri, "unzip://%s/%s!/theme.xml", psz_dir, psz_file ) >= 0)
+        if( asprintf( &psz_uri, "file://%s/%s#!/theme.xml", psz_dir, psz_file ) >= 0)
         {
             int i_ret;
             char *psz_name = NULL;
             char *psz_source = NULL;
-            stream_t *p_stream = stream_UrlNew( p_finder, psz_uri );
+            stream_t *p_stream = vlc_stream_NewMRL( p_finder, psz_uri );
             free( psz_uri );
             if ( !p_stream )
             {
@@ -228,7 +243,7 @@ static int ListSkins( addons_finder_t *p_finder )
                     free( psz_name );
                     free( psz_source );
                 }
-                stream_Delete( p_stream );
+                vlc_stream_Delete( p_stream );
             }
 
             addon_entry_t *p_entry = addon_entry_New();
@@ -261,15 +276,19 @@ static bool FileBelongsToManagedAddon( addons_finder_t *p_finder,
                                        const addon_type_t e_type,
                                        const char *psz_file )
 {
-    FOREACH_ARRAY( const addon_entry_t *p_entry, p_finder->entries )
+    const addon_entry_t *p_entry;
+    ARRAY_FOREACH( p_entry, p_finder->entries )
+    {
         if ( ( p_entry->e_flags & ADDON_MANAGEABLE ) == 0 )
             continue;
-        FOREACH_ARRAY( const addon_file_t *p_file, p_entry->files )
+        const addon_file_t *p_file;
+        ARRAY_FOREACH( p_file, p_entry->files )
+        {
             if ( p_file->e_filetype == e_type
                  && !strcmp( p_file->psz_filename, psz_file ) )
                 return true;
-        FOREACH_END();
-    FOREACH_END();
+        }
+    }
     return false;
 }
 
@@ -310,7 +329,9 @@ static int List( addons_finder_t *p_finder )
     addon_type_t types[] = {
         ADDON_EXTENSION,
         ADDON_PLAYLIST_PARSER,
-        ADDON_SERVICE_DISCOVERY
+        ADDON_SERVICE_DISCOVERY,
+        ADDON_INTERFACE,
+        ADDON_META,
     };
     unsigned int i_type = 0;
 
@@ -369,7 +390,7 @@ static int InstallFile( addons_storage_t *p_this, const char *psz_downloadlink,
     char buffer[1<<10];
     int i_read = 0;
 
-    p_stream = stream_UrlNew( p_this, psz_downloadlink );
+    p_stream = vlc_stream_NewMRL( p_this, psz_downloadlink );
     if( !p_stream )
     {
         msg_Err( p_this, "Failed to access Addon download url %s", psz_downloadlink );
@@ -379,7 +400,7 @@ static int InstallFile( addons_storage_t *p_this, const char *psz_downloadlink,
     char *psz_path = strdup( psz_dest );
     if ( !psz_path )
     {
-        stream_Delete( p_stream );
+        vlc_stream_Delete( p_stream );
         return VLC_ENOMEM;
     }
     char *psz_buf = strrchr( psz_path, DIR_SEP_CHAR );
@@ -388,31 +409,31 @@ static int InstallFile( addons_storage_t *p_this, const char *psz_downloadlink,
         *++psz_buf = '\0';
         /* ensure directory exists */
         if( !EMPTY_STR( psz_path ) ) recursive_mkdir( VLC_OBJECT(p_this), psz_path );
-        free( psz_path );
     }
+    free( psz_path );
 
     p_destfile = vlc_fopen( psz_dest, "w" );
     if( !p_destfile )
     {
         msg_Err( p_this, "Failed to open Addon storage file %s", psz_dest );
-        stream_Delete( p_stream );
+        vlc_stream_Delete( p_stream );
         return VLC_EGENERIC;
     }
 
-    while ( ( i_read = stream_Read( p_stream, &buffer, 1<<10 ) ) )
+    while ( ( i_read = vlc_stream_Read( p_stream, &buffer, 1<<10 ) ) > 0 )
     {
         if ( fwrite( &buffer, i_read, 1, p_destfile ) < 1 )
         {
             msg_Err( p_this, "Failed to write to Addon file" );
-            fclose( p_destfile );
-            stream_Delete( p_stream );
-            return VLC_EGENERIC;
+            break;
         }
     }
 
     fclose( p_destfile );
-    stream_Delete( p_stream );
-    return VLC_SUCCESS;
+    if ( i_read < 0 )
+        vlc_unlink( psz_dest );
+    vlc_stream_Delete( p_stream );
+    return i_read >= 0 ? VLC_SUCCESS : VLC_EGENERIC;
 }
 
 static int InstallAllFiles( addons_storage_t *p_this, const addon_entry_t *p_entry )
@@ -423,53 +444,54 @@ static int InstallAllFiles( addons_storage_t *p_this, const addon_entry_t *p_ent
     if ( p_entry->files.i_size < 1 )
         return VLC_EGENERIC;
 
-    FOREACH_ARRAY( p_file, p_entry->files )
-
-    switch( p_file->e_filetype )
+    ARRAY_FOREACH( p_file, p_entry->files )
     {
-        case ADDON_EXTENSION:
-        case ADDON_PLAYLIST_PARSER:
-        case ADDON_SERVICE_DISCOVERY:
-        case ADDON_SKIN2:
+        switch( p_file->e_filetype )
         {
-            if ( strstr( p_file->psz_filename, ".." ) )
-                return VLC_EGENERIC;
-
-            char *psz_translated_filename = strdup( p_file->psz_filename );
-            if ( !psz_translated_filename )
-                return VLC_ENOMEM;
-            char *tmp = psz_translated_filename;
-            while (*tmp++) if ( *tmp == '/' ) *tmp = DIR_SEP_CHAR;
-
-            char *psz_dir = getAddonInstallDir( p_file->e_filetype );
-            if ( !psz_dir || asprintf( &psz_dest, "%s"DIR_SEP"%s", psz_dir,
-                           psz_translated_filename ) < 1 )
+            case ADDON_EXTENSION:
+            case ADDON_PLAYLIST_PARSER:
+            case ADDON_SERVICE_DISCOVERY:
+            case ADDON_INTERFACE:
+            case ADDON_META:
+            case ADDON_SKIN2:
             {
-                free( psz_dir );
+                if ( strstr( p_file->psz_filename, ".." ) )
+                    return VLC_EGENERIC;
+
+                char *psz_translated_filename = strdup( p_file->psz_filename );
+                if ( !psz_translated_filename )
+                    return VLC_ENOMEM;
+                char *tmp = psz_translated_filename;
+                while (*tmp++) if ( *tmp == '/' ) *tmp = DIR_SEP_CHAR;
+
+                char *psz_dir = getAddonInstallDir( p_file->e_filetype );
+                if ( !psz_dir || asprintf( &psz_dest, "%s"DIR_SEP"%s", psz_dir,
+                               psz_translated_filename ) < 1 )
+                {
+                    free( psz_dir );
+                    free( psz_translated_filename );
+                    return VLC_EGENERIC;
+                }
                 free( psz_translated_filename );
-                return VLC_EGENERIC;
-            }
-            free( psz_translated_filename );
-            free( psz_dir );
+                free( psz_dir );
 
-            if ( InstallFile( p_this, p_file->psz_download_uri, psz_dest ) != VLC_SUCCESS )
-            {
+                if ( InstallFile( p_this, p_file->psz_download_uri, psz_dest ) != VLC_SUCCESS )
+                {
+                    free( psz_dest );
+                    return VLC_EGENERIC;
+                }
+
                 free( psz_dest );
-                return VLC_EGENERIC;
+                break;
             }
-
-            free( psz_dest );
-            break;
+            /* Ignore all other unhandled files */
+            case ADDON_UNKNOWN:
+            case ADDON_PLUGIN:
+            case ADDON_OTHER:
+            default:
+                break;
         }
-        /* Ignore all other unhandled files */
-        case ADDON_UNKNOWN:
-        case ADDON_PLUGIN:
-        case ADDON_OTHER:
-        default:
-            break;
     }
-
-    FOREACH_END()
 
     return VLC_SUCCESS;
 }
@@ -491,18 +513,19 @@ static int Install( addons_storage_t *p_storage, addon_entry_t *p_entry )
                                       p_entry->psz_source_module, true );
     if( p_module )
     {
-        vlc_mutex_lock( &p_entry->lock );
         if ( p_finder->pf_retrieve( p_finder, p_entry ) == VLC_SUCCESS )
         {
             /* Do things while retrieved data is here */
+            vlc_mutex_lock( &p_entry->lock );
             i_ret = InstallAllFiles( p_storage, p_entry );
+            vlc_mutex_unlock( &p_entry->lock );
             /* !Do things while retrieved data is here */
         }
-        vlc_mutex_unlock( &p_entry->lock );
+
         module_unneed( p_finder, p_module );
     }
 
-    vlc_object_release( p_finder );
+    vlc_object_delete(p_finder);
 
     return i_ret;
 }
@@ -510,7 +533,7 @@ static int Install( addons_storage_t *p_storage, addon_entry_t *p_entry )
 #define WRITE_WITH_ENTITIES( formatstring, varname ) \
 if ( varname ) \
 {\
-    psz_tempstring = convert_xml_special_chars( varname );\
+    psz_tempstring = vlc_xml_encode( varname );\
     fprintf( p_catalog, formatstring, psz_tempstring );\
     free( psz_tempstring );\
 }\
@@ -520,8 +543,9 @@ static int WriteCatalog( addons_storage_t *p_storage,
 {
     addon_entry_t *p_entry;
     char *psz_file;
-    char *psz_tempstring = NULL;
-    char *psz_userdir = config_GetUserDir( VLC_DATA_DIR );
+    char *psz_file_tmp;
+    char *psz_tempstring;
+    char *psz_userdir = config_GetUserDir( VLC_USERDATA_DIR );
     if ( !psz_userdir ) return VLC_ENOMEM;
 
     if ( asprintf( &psz_file, "%s%s", psz_userdir, ADDONS_CATALOG ) < 1 )
@@ -531,10 +555,17 @@ static int WriteCatalog( addons_storage_t *p_storage,
     }
     free( psz_userdir );
 
+    if ( asprintf( &psz_file_tmp, "%s.tmp%"PRIu32, psz_file, (uint32_t)getpid() ) < 1 )
+    {
+        free( psz_file );
+        return VLC_ENOMEM;
+    }
+
     char *psz_path = strdup( psz_file );
     if ( !psz_path )
     {
         free( psz_file );
+        free( psz_file_tmp );
         return VLC_ENOMEM;
     }
 
@@ -544,14 +575,16 @@ static int WriteCatalog( addons_storage_t *p_storage,
         *++psz_buf = '\0';
         /* ensure directory exists */
         if( !EMPTY_STR( psz_path ) ) recursive_mkdir( VLC_OBJECT(p_storage), psz_path );
-        free( psz_path );
     }
+    free( psz_path );
 
-    FILE *p_catalog = vlc_fopen( psz_file, "wt" );
-    free( psz_file );
-
+    FILE *p_catalog = vlc_fopen( psz_file_tmp, "wt" );
     if ( !p_catalog )
+    {
+        free( psz_file );
+        free( psz_file_tmp );
         return VLC_EGENERIC;
+    }
 
     /* write XML header */
     fprintf( p_catalog, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" );
@@ -562,6 +595,8 @@ static int WriteCatalog( addons_storage_t *p_storage,
     {
         p_entry = pp_entries[i];
         vlc_mutex_lock( &p_entry->lock );
+        psz_tempstring = NULL;
+
         if ( ( p_entry->e_state != ADDON_INSTALLED ) ||
              !( p_entry->e_flags & ADDON_MANAGEABLE ) )
         {
@@ -570,11 +605,11 @@ static int WriteCatalog( addons_storage_t *p_storage,
         }
 
         if ( p_entry->psz_source_module )
-            psz_tempstring = convert_xml_special_chars( p_entry->psz_source_module );
+            psz_tempstring = vlc_xml_encode( p_entry->psz_source_module );
 
         char *psz_uuid = addons_uuid_to_psz( ( const addon_uuid_t * ) & p_entry->uuid );
         fprintf( p_catalog, "\t\t<addon source=\"%s\" type=\"%s\" id=\"%s\" "
-                                 "downloads=\"%ld\" score=\"%ld\"",
+                                 "downloads=\"%ld\" score=\"%d\"",
                  ( psz_tempstring ) ? psz_tempstring : "",
                  getTypePsz( p_entry->e_type ),
                  psz_uuid,
@@ -583,7 +618,8 @@ static int WriteCatalog( addons_storage_t *p_storage,
         free( psz_uuid );
         free( psz_tempstring );
 
-        WRITE_WITH_ENTITIES( " version=\"%s\">\n", p_entry->psz_version )
+        WRITE_WITH_ENTITIES( " version=\"%s\"", p_entry->psz_version )
+        fprintf( p_catalog, ">\n" );
 
         WRITE_WITH_ENTITIES( "\t\t\t<name>%s</name>\n", p_entry->psz_name )
         WRITE_WITH_ENTITIES( "\t\t\t<summary>%s</summary>\n", p_entry->psz_summary )
@@ -605,12 +641,14 @@ static int WriteCatalog( addons_storage_t *p_storage,
         WRITE_WITH_ENTITIES( "\t\t\t\t<sourceurl>%s</sourceurl>\n", p_entry->psz_source_uri )
         fprintf( p_catalog, "\t\t\t</authorship>\n" );
 
-        FOREACH_ARRAY( addon_file_t *p_file, p_entry->files )
-            psz_tempstring = convert_xml_special_chars( p_file->psz_filename );
+        addon_file_t *p_file;
+        ARRAY_FOREACH( p_file, p_entry->files )
+        {
+            psz_tempstring = vlc_xml_encode( p_file->psz_filename );
             fprintf( p_catalog, "\t\t\t<resource type=\"%s\">%s</resource>\n",
                      getTypePsz( p_file->e_filetype ), psz_tempstring );
             free( psz_tempstring );
-        FOREACH_END();
+        }
 
         fprintf( p_catalog, "\t\t</addon>\n" );
 
@@ -620,16 +658,28 @@ static int WriteCatalog( addons_storage_t *p_storage,
     fprintf( p_catalog, "\t</addons>\n" );
     fprintf( p_catalog, "</videolan>\n" );
     fclose( p_catalog );
+
+    int i_ret = vlc_rename( psz_file_tmp, psz_file );
+    free( psz_file );
+    free( psz_file_tmp );
+
+    if( i_ret == -1 )
+    {
+        msg_Err( p_storage, "could not rename temp catalog: %s",
+                 vlc_strerror_c(errno) );
+        return VLC_EGENERIC;
+    }
+
     return VLC_SUCCESS;
 }
 
 static int LoadCatalog( addons_finder_t *p_finder )
 {
     char *psz_path;
-    char * psz_userdir = config_GetUserDir( VLC_DATA_DIR );
+    char * psz_userdir = config_GetUserDir( VLC_USERDATA_DIR );
     if ( !psz_userdir ) return VLC_ENOMEM;
 
-    if ( asprintf( &psz_path, "file://%s%s", psz_userdir, ADDONS_CATALOG ) < 1 )
+    if ( asprintf( &psz_path, "%s%s", psz_userdir, ADDONS_CATALOG ) < 1 )
     {
         free( psz_userdir );
         return VLC_ENOMEM;
@@ -655,14 +705,19 @@ static int LoadCatalog( addons_finder_t *p_finder )
         return VLC_EGENERIC;
     }
 
-    stream_t *p_stream = stream_UrlNew( p_finder, psz_path );
+    char *psz_catalog_uri = vlc_path2uri( psz_path, "file" );
     free( psz_path );
+    if ( !psz_catalog_uri )
+        return VLC_EGENERIC;
+
+    stream_t *p_stream = vlc_stream_NewURL( p_finder, psz_catalog_uri );
+    free( psz_catalog_uri );
     if (! p_stream ) return VLC_EGENERIC;
 
     xml_reader_t *p_xml_reader = xml_ReaderCreate( p_finder, p_stream );
     if( !p_xml_reader )
     {
-        stream_Delete( p_stream );
+        vlc_stream_Delete( p_stream );
         return VLC_EGENERIC;
     }
 
@@ -688,6 +743,9 @@ static int LoadCatalog( addons_finder_t *p_finder )
         {
             if ( ! strcmp( p_node, "addon" ) )
             {
+                if ( p_entry ) /* ?!? Unclosed tag */
+                    addon_entry_Release( p_entry );
+
                 p_entry = addon_entry_New();
                 //p_entry->psz_source_module = strdup( ADDONS_MODULE_SHORTCUT );
                 p_entry->e_flags = ADDON_MANAGEABLE;
@@ -706,10 +764,16 @@ static int LoadCatalog( addons_finder_t *p_finder )
                     else if ( !strcmp( attr, "downloads" ) )
                     {
                         p_entry->i_downloads = atoi( value );
+                        if ( p_entry->i_downloads < 0 )
+                            p_entry->i_downloads = 0;
                     }
                     else if ( !strcmp( attr, "score" ) )
                     {
-                        p_entry->i_score = atol( value );
+                        p_entry->i_score = atoi( value );
+                        if ( p_entry->i_score < 0 )
+                            p_entry->i_score = 0;
+                        else if ( p_entry->i_score > ADDON_MAX_SCORE )
+                            p_entry->i_score = ADDON_MAX_SCORE;
                     }
                     else if ( !strcmp( attr, "source" ) )
                     {
@@ -794,62 +858,69 @@ static int LoadCatalog( addons_finder_t *p_finder )
     }
 
 end:
+   if ( p_entry ) /* ?!? Unclosed tag */
+       addon_entry_Release( p_entry );
    xml_ReaderDelete( p_xml_reader );
-   stream_Delete( p_stream );
+   vlc_stream_Delete( p_stream );
    return i_ret;
 }
 
 static int Remove( addons_storage_t *p_storage, addon_entry_t *p_entry )
 {
     vlc_mutex_lock( &p_entry->lock );
-    FOREACH_ARRAY( addon_file_t *p_file, p_entry->files )
-    switch( p_file->e_filetype )
+    addon_file_t *p_file;
+    ARRAY_FOREACH( p_file, p_entry->files )
     {
-        case ADDON_EXTENSION:
-        case ADDON_PLAYLIST_PARSER:
-        case ADDON_SERVICE_DISCOVERY:
-        case ADDON_SKIN2:
+        switch( p_file->e_filetype )
         {
-            char *psz_dest;
-
-            char *psz_translated_filename = strdup( p_file->psz_filename );
-            if ( !psz_translated_filename )
-                return VLC_ENOMEM;
-            char *tmp = psz_translated_filename;
-            while (*tmp++) if ( *tmp == '/' ) *tmp = DIR_SEP_CHAR;
-
-            char *psz_dir = getAddonInstallDir( p_file->e_filetype );
-            if ( !psz_dir || asprintf( &psz_dest, "%s"DIR_SEP"%s", psz_dir,
-                                       psz_translated_filename ) < 1 )
+            case ADDON_EXTENSION:
+            case ADDON_PLAYLIST_PARSER:
+            case ADDON_SERVICE_DISCOVERY:
+            case ADDON_INTERFACE:
+            case ADDON_META:
+            case ADDON_SKIN2:
             {
+                char *psz_dest;
+
+                char *psz_translated_filename = strdup( p_file->psz_filename );
+                if ( !psz_translated_filename )
+                    return VLC_ENOMEM;
+                char *tmp = psz_translated_filename;
+                while (*tmp++) if ( *tmp == '/' ) *tmp = DIR_SEP_CHAR;
+
+                char *psz_dir = getAddonInstallDir( p_file->e_filetype );
+                if ( !psz_dir || asprintf( &psz_dest, "%s"DIR_SEP"%s", psz_dir,
+                                           psz_translated_filename ) < 1 )
+                {
+                    free( psz_dir );
+                    free( psz_translated_filename );
+                    return VLC_EGENERIC;
+                }
                 free( psz_dir );
                 free( psz_translated_filename );
-                return VLC_EGENERIC;
+
+                vlc_unlink( psz_dest );
+                msg_Dbg( p_storage, "removing %s", psz_dest );
+
+                free( psz_dest );
+                break;
             }
-            free( psz_dir );
-            free( psz_translated_filename );
-
-            vlc_unlink( psz_dest );
-            msg_Dbg( p_storage, "removing %s", psz_dest );
-
-            free( psz_dest );
-            break;
+                /* Ignore all other unhandled files */
+            case ADDON_UNKNOWN:
+            case ADDON_PLUGIN:
+            case ADDON_OTHER:
+            default:
+                break;
         }
-            /* Ignore all other unhandled files */
-        case ADDON_UNKNOWN:
-        case ADDON_PLUGIN:
-        case ADDON_OTHER:
-        default:
-            break;
     }
-    FOREACH_END()
 
     /* Remove file info on success */
-    FOREACH_ARRAY( addon_file_t *p_file, p_entry->files )
-    free( p_file->psz_filename );
-    free( p_file->psz_download_uri );
-    free( p_file );
-    FOREACH_END()
+    ARRAY_FOREACH( p_file, p_entry->files )
+    {
+        free( p_file->psz_filename );
+        free( p_file->psz_download_uri );
+        free( p_file );
+    }
     ARRAY_RESET( p_entry->files );
 
     vlc_mutex_unlock( &p_entry->lock );

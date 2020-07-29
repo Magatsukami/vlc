@@ -2,22 +2,26 @@ NULL =
 
 LIBVLC_SAMPLES = \
 	libvlc/gtk_player.c \
-	libvlc/libvlc_DVD_ripper.c \
 	libvlc/QtPlayer/LICENSE \
 	libvlc/QtPlayer/main.cpp \
 	libvlc/QtPlayer/player.cpp \
 	libvlc/QtPlayer/player.h \
 	libvlc/QtPlayer/QtVLC.pro \
+	libvlc/QtGL/main.cpp \
+	libvlc/QtGL/qtvlcwidget.cpp \
+	libvlc/QtGL/qtvlcwidget.h \
+	libvlc/QtGL/QtGl.pro \
 	libvlc/vlc-thumb.c \
 	libvlc/wx_player.cpp \
+	libvlc/d3d11_player.cpp \
+	libvlc/d3d9_player.c \
+	libvlc/win_player.c \
 	$(NULL)
 
 nobase_doc_DATA = $(LIBVLC_SAMPLES)
 
 doc_DATA = \
-	bugreport-howto.txt \
 	fortunes.txt \
-	intf-vcd.txt \
 	$(NULL)
 
 CHANGELOGS = \
@@ -37,6 +41,11 @@ CHANGELOGS = \
 	ChangeLog-2012 \
 	ChangeLog-2013 \
 	ChangeLog-2014 \
+	ChangeLog-2015 \
+	ChangeLog-2016 \
+	ChangeLog-2017 \
+	ChangeLog-2018 \
+	ChangeLog-2019 \
 	$(NULL)
 
 man1_MANS = \
@@ -47,9 +56,7 @@ EXTRA_DIST = \
 	$(CHANGELOGS) \
 	$(man1_MANS) \
 	$(LIBVLC_SAMPLES) \
-	bugreport-howto.txt \
 	fortunes.txt \
-	intf-vcd.txt \
 	release-howto.txt \
 	Doxyfile.in \
 	lirc/example.lircrc \
@@ -75,7 +82,7 @@ doc: Doxyfile
 	doxygen
 
 $(CHANGELOGS): Makefile.am
-	if test -d "$(top_srcdir)/.git"; then \
+	if test -e "$(top_srcdir)/.git"; then \
 		y="$@"; y="$${y##ChangeLog-}" ; \
 		git --git-dir="$(top_srcdir)/.git" log \
 			--since="$$y-01-01" \
@@ -84,7 +91,7 @@ $(CHANGELOGS): Makefile.am
 	fi
 
 # This one needs to be rebuilt all the time :)
-.PHONY: ChangeLog-2014 changelogs doc
+.PHONY: ChangeLog-2016 changelogs doc
 
 changelogs: $(CHANGELOGS)
 

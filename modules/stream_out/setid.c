@@ -61,7 +61,7 @@ vlc_module_begin()
     set_shortname( N_("Set ID"))
     set_section( N_("Set ES id"), NULL )
     set_description( N_("Change the id of an elementary stream"))
-    set_capability( "sout stream", 50 )
+    set_capability( "sout filter", 50 )
     add_shortcut( "setid" )
     set_category( CAT_SOUT )
     set_subcategory( SUBCAT_SOUT_STREAM )
@@ -74,7 +74,7 @@ vlc_module_begin()
     set_section( N_("Set ES Lang"), NULL )
     set_shortname( N_("Set Lang"))
     set_description( N_("Change the language of an elementary stream"))
-    set_capability( "sout stream", 50 )
+    set_capability( "sout filter", 50 )
     add_shortcut( "setlang" );
     set_callbacks( OpenLang, Close )
     add_integer( SOUT_CFG_PREFIX_LANG "id", 0, ID_TEXT, ID_LONGTEXT, false )
@@ -95,17 +95,17 @@ static const char *ppsz_sout_options_lang[] = {
     "id", "lang", NULL
 };
 
-static sout_stream_id_t *AddId   ( sout_stream_t *, es_format_t * );
-static sout_stream_id_t *AddLang ( sout_stream_t *, es_format_t * );
-static int               Del     ( sout_stream_t *, sout_stream_id_t * );
-static int               Send    ( sout_stream_t *, sout_stream_id_t *, block_t * );
+static void *AddId  ( sout_stream_t *, const es_format_t * );
+static void *AddLang( sout_stream_t *, const es_format_t * );
+static void  Del    ( sout_stream_t *, void * );
+static int   Send   ( sout_stream_t *, void *, block_t * );
 
-struct sout_stream_sys_t
+typedef struct
 {
     int              i_id;
     int              i_new_id;
     char             *psz_language;
-};
+} sout_stream_sys_t;
 
 /*****************************************************************************
  * Open:
@@ -114,12 +114,6 @@ static int OpenCommon( vlc_object_t *p_this )
 {
     sout_stream_t     *p_stream = (sout_stream_t*)p_this;
     sout_stream_sys_t *p_sys;
-
-    if( !p_stream->p_next )
-    {
-        msg_Err( p_stream, "cannot create chain" );
-        return VLC_EGENERIC;
-    }
 
     p_sys = malloc( sizeof( sout_stream_sys_t ) );
     if( unlikely( !p_sys ) )
@@ -144,9 +138,10 @@ static int OpenId( vlc_object_t *p_this )
     config_ChainParse( p_stream, SOUT_CFG_PREFIX_ID, ppsz_sout_options_id,
                        p_stream->p_cfg );
 
-    p_stream->p_sys->i_id = var_GetInteger( p_stream, SOUT_CFG_PREFIX_ID "id" );
-    p_stream->p_sys->i_new_id = var_GetInteger( p_stream, SOUT_CFG_PREFIX_ID "new-id" );
-    p_stream->p_sys->psz_language = NULL;
+    sout_stream_sys_t *p_sys = p_stream->p_sys;
+    p_sys->i_id = var_GetInteger( p_stream, SOUT_CFG_PREFIX_ID "id" );
+    p_sys->i_new_id = var_GetInteger( p_stream, SOUT_CFG_PREFIX_ID "new-id" );
+    p_sys->psz_language = NULL;
 
     p_stream->pf_add = AddId;
 
@@ -164,9 +159,10 @@ static int OpenLang( vlc_object_t *p_this )
     config_ChainParse( p_stream, SOUT_CFG_PREFIX_LANG, ppsz_sout_options_lang,
                        p_stream->p_cfg );
 
-    p_stream->p_sys->i_id = var_GetInteger( p_stream, SOUT_CFG_PREFIX_LANG "id" );
-    p_stream->p_sys->i_new_id = -1;
-    p_stream->p_sys->psz_language = var_GetString( p_stream, SOUT_CFG_PREFIX_LANG "lang" );
+    sout_stream_sys_t *p_sys = p_stream->p_sys;
+    p_sys->i_id = var_GetInteger( p_stream, SOUT_CFG_PREFIX_LANG "id" );
+    p_sys->i_new_id = -1;
+    p_sys->psz_language = var_GetString( p_stream, SOUT_CFG_PREFIX_LANG "lang" );
 
     p_stream->pf_add = AddLang;
 
@@ -185,42 +181,49 @@ static void Close( vlc_object_t * p_this )
     free( p_sys );
 }
 
-static sout_stream_id_t * AddId( sout_stream_t *p_stream, es_format_t *p_fmt )
+static void *AddId( sout_stream_t *p_stream, const es_format_t *p_fmt )
 {
     sout_stream_sys_t *p_sys = (sout_stream_sys_t *)p_stream->p_sys;
+    es_format_t fmt;
 
-    if ( p_fmt->i_id == p_sys->i_id )
+    if( p_fmt->i_id == p_sys->i_id )
     {
-        msg_Dbg( p_stream, "turning ID %d to %d",
-                 p_sys->i_id, p_sys->i_new_id );
-        p_fmt->i_id = p_sys->i_new_id;
+        msg_Dbg( p_stream, "turning ID %d to %d", p_sys->i_id,
+                 p_sys->i_new_id );
+
+        fmt = *p_fmt;
+        fmt.i_id = p_sys->i_new_id;
+        p_fmt = &fmt;
     }
 
-    return p_stream->p_next->pf_add( p_stream->p_next, p_fmt );
+    return sout_StreamIdAdd( p_stream->p_next, p_fmt );
 }
 
-static sout_stream_id_t * AddLang( sout_stream_t *p_stream, es_format_t *p_fmt )
+static void *AddLang( sout_stream_t *p_stream, const es_format_t *p_fmt )
 {
     sout_stream_sys_t *p_sys = (sout_stream_sys_t *)p_stream->p_sys;
+    es_format_t fmt;
 
     if ( p_fmt->i_id == p_sys->i_id )
     {
         msg_Dbg( p_stream, "turning language %s of ID %d to %s",
                  p_fmt->psz_language ? p_fmt->psz_language : "unk",
                  p_sys->i_id, p_sys->psz_language );
-        p_fmt->psz_language = strdup( p_sys->psz_language );
+
+        fmt = *p_fmt;
+        fmt.psz_language = p_sys->psz_language;
+        p_fmt = &fmt;
     }
 
-    return p_stream->p_next->pf_add( p_stream->p_next, p_fmt );
+    return sout_StreamIdAdd( p_stream->p_next, p_fmt );
 }
 
-static int Del( sout_stream_t *p_stream, sout_stream_id_t *id )
+static void Del( sout_stream_t *p_stream, void *id )
 {
-    return p_stream->p_next->pf_del( p_stream->p_next, id );
+    sout_StreamIdDel( p_stream->p_next, id );
 }
 
-static int Send( sout_stream_t *p_stream, sout_stream_id_t *id,
-                 block_t *p_buffer )
+static int Send( sout_stream_t *p_stream, void *id, block_t *p_buffer )
 {
-    return p_stream->p_next->pf_send( p_stream->p_next, id, p_buffer );
+    return sout_StreamIdSend( p_stream->p_next, id, p_buffer );
 }

@@ -2,7 +2,6 @@
  * directsound.c: DirectSound audio output plugin for VLC
  *****************************************************************************
  * Copyright (C) 2001-2009 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Gildas Bazin <gbazin@videolan.org>
  *
@@ -29,6 +28,7 @@
 # include "config.h"
 #endif
 
+#include <assert.h>
 #include <math.h>
 
 #include <vlc_common.h>
@@ -46,10 +46,7 @@ static int  Open( vlc_object_t * );
 static void Close( vlc_object_t * );
 static HRESULT StreamStart( aout_stream_t *, audio_sample_format_t *,
                             const GUID * );
-static HRESULT StreamStop( aout_stream_t * );
-static int ReloadDirectXDevices( vlc_object_t *, const char *,
-                                 char ***, char *** );
-
+static void * PlayedDataEraser( void * );
 /* Speaker setup override options list */
 static const char *const speaker_list[] = { "Windows default", "Mono", "Stereo",
                                             "Quad", "5.1", "7.1" };
@@ -73,11 +70,10 @@ vlc_module_begin ()
     set_capability( "audio output", 100 )
     set_category( CAT_AUDIO )
     set_subcategory( SUBCAT_AUDIO_AOUT )
-    add_shortcut( "directx", "aout_directx" )
+    add_shortcut( "directx", "aout_directx", "directsound", "dsound" )
 
     add_string( "directx-audio-device", NULL,
              DEVICE_TEXT, DEVICE_LONGTEXT, false )
-        change_string_cb( ReloadDirectXDevices )
     add_obsolete_string( "directx-audio-device-name")
     add_bool( "directx-audio-float32", true, FLOAT_TEXT,
               FLOAT_LONGTEXT, true )
@@ -86,13 +82,13 @@ vlc_module_begin ()
         change_string_list( speaker_list, speaker_list )
     add_float( "directx-volume", 1.0f,
                  VOLUME_TEXT, VOLUME_LONGTEXT, true )
-        change_integer_range( DSBVOLUME_MIN, DSBVOLUME_MAX )
+        change_float_range( 0.f, 2.f )
 
     set_callbacks( Open, Close )
 
     add_submodule()
         set_capability( "aout stream", 30 )
-        set_callbacks( StreamStart, StreamStop )
+        set_callback( StreamStart )
 vlc_module_end ()
 
 typedef struct aout_stream_sys
@@ -112,6 +108,13 @@ typedef struct aout_stream_sys
     vlc_fourcc_t format;
 
     size_t  i_write;
+    size_t  i_last_read;
+    int64_t i_data;
+
+    bool b_playing;
+    vlc_mutex_t lock;
+    vlc_cond_t cond;
+    vlc_thread_t eraser_thread;
 } aout_stream_sys_t;
 
 /**
@@ -120,7 +123,7 @@ typedef struct aout_stream_sys
  * This structure is part of the audio output thread descriptor.
  * It describes the direct sound specific properties of an audio device.
  */
-struct aout_sys_t
+typedef struct
 {
     aout_stream_sys_t s;
     struct
@@ -129,37 +132,55 @@ struct aout_sys_t
         LONG          mb;
         bool          mute;
     } volume;
-    HINSTANCE         hdsound_dll; /*< handle of the opened dsound DLL */
-};
+} aout_sys_t;
 
-static HRESULT TimeGet( aout_stream_sys_t *sys, mtime_t *delay )
+static HRESULT Flush( aout_stream_sys_t *sys );
+static HRESULT TimeGet( aout_stream_sys_t *sys, vlc_tick_t *delay )
 {
-    DWORD read;
+    DWORD read, status;
     HRESULT hr;
-    mtime_t size;
+    ssize_t size;
+
+    hr = IDirectSoundBuffer_GetStatus( sys->p_dsbuffer, &status );
+    if( hr != DS_OK )
+        return hr;
+    if( !(status & DSBSTATUS_PLAYING) )
+        return DSERR_INVALIDCALL ;
 
     hr = IDirectSoundBuffer_GetCurrentPosition( sys->p_dsbuffer, &read, NULL );
     if( hr != DS_OK )
         return hr;
 
-    read %= DS_BUF_SIZE;
+    size = (ssize_t)read - sys->i_last_read;
 
-    size = (mtime_t)sys->i_write - (mtime_t) read;
-    if( size < 0 )
-        size += DS_BUF_SIZE;
+    /* GetCurrentPosition cannot be trusted if the return doesn't change
+     * Just return an error */
+    if( size ==  0 )
+        return DSERR_GENERIC ;
+    else if( size < 0 )
+      size += DS_BUF_SIZE;
 
-    *delay = ( size / sys->i_bytes_per_sample ) * CLOCK_FREQ / sys->i_rate;
+    sys->i_data -= size;
+    sys->i_last_read = read;
+
+    if( sys->i_data < 0 )
+        /* underrun */
+        Flush(sys);
+
+    *delay = vlc_tick_from_samples( sys->i_data / sys->i_bytes_per_sample, sys->i_rate );
+
     return DS_OK;
 }
 
-static HRESULT StreamTimeGet( aout_stream_t *s, mtime_t *delay )
+static HRESULT StreamTimeGet( aout_stream_t *s, vlc_tick_t *delay )
 {
     return TimeGet( s->sys, delay );
 }
 
-static int OutputTimeGet( audio_output_t *aout, mtime_t *delay )
+static int OutputTimeGet( audio_output_t *aout, vlc_tick_t *delay )
 {
-    return (TimeGet( &aout->sys->s, delay ) == DS_OK) ? 0 : -1;
+    aout_sys_t *sys = aout->sys;
+    return (TimeGet( &sys->s, delay ) == DS_OK) ? 0 : -1;
 }
 
 /**
@@ -173,33 +194,15 @@ static HRESULT FillBuffer( vlc_object_t *obj, aout_stream_sys_t *p_sys,
     size_t towrite = (p_buffer != NULL) ? p_buffer->i_buffer : DS_BUF_SIZE;
     void *p_write_position, *p_wrap_around;
     unsigned long l_bytes1, l_bytes2;
-    DWORD i_read;
-    size_t i_size;
-    mtime_t i_buf;
     HRESULT dsresult;
 
-    size_t toerase = p_sys->i_bytes_per_sample * p_sys->i_rate / 4;
-    mtime_t max = towrite;
-
-    dsresult = IDirectSoundBuffer_GetCurrentPosition( p_sys->p_dsbuffer,
-                                                      &i_read, NULL );
-    if( dsresult == DS_OK )
-    {
-        max = (mtime_t)i_read - (mtime_t)p_sys->i_write;
-        if( max <= 0 )
-            max += DS_BUF_SIZE;
-    }
-
-    if( towrite + toerase <= max )
-        i_buf = towrite + toerase;
-    else
-        i_buf = towrite;
+    vlc_mutex_lock( &p_sys->lock );
 
     /* Before copying anything, we have to lock the buffer */
     dsresult = IDirectSoundBuffer_Lock(
            p_sys->p_dsbuffer,    /* DS buffer */
            p_sys->i_write,       /* Start offset */
-           i_buf,                /* Number of bytes */
+           towrite,                /* Number of bytes */
            &p_write_position,    /* Address of lock start */
            &l_bytes1,            /* Count of bytes locked before wrap around */
            &p_wrap_around,       /* Buffer address (if wrap around) */
@@ -211,7 +214,7 @@ static HRESULT FillBuffer( vlc_object_t *obj, aout_stream_sys_t *p_sys,
         dsresult = IDirectSoundBuffer_Lock(
                                p_sys->p_dsbuffer,
                                p_sys->i_write,
-                               i_buf,
+                               towrite,
                                &p_write_position,
                                &l_bytes1,
                                &p_wrap_around,
@@ -223,6 +226,7 @@ static HRESULT FillBuffer( vlc_object_t *obj, aout_stream_sys_t *p_sys,
         msg_Warn( obj, "cannot lock buffer" );
         if( p_buffer != NULL )
             block_Release( p_buffer );
+        vlc_mutex_unlock( &p_sys->lock );
         return dsresult;
     }
 
@@ -238,18 +242,13 @@ static HRESULT FillBuffer( vlc_object_t *obj, aout_stream_sys_t *p_sys,
                                  p_sys->chans_to_reorder, p_sys->chan_table,
                                  p_sys->format );
 
+        memcpy( p_write_position, p_buffer->p_buffer, l_bytes1 );
+        if( p_wrap_around && l_bytes2 )
+            memcpy( p_wrap_around, p_buffer->p_buffer + l_bytes1, l_bytes2 );
 
-        i_size = ( p_buffer->i_buffer < l_bytes1 ) ? p_buffer->i_buffer : l_bytes1;
-        memcpy( p_write_position, p_buffer->p_buffer, i_size );
-        memset( (uint8_t*) p_write_position + i_size, 0, l_bytes1 - i_size );
+        if( unlikely( ( l_bytes1 + l_bytes2 ) < p_buffer->i_buffer ) )
+            msg_Err( obj, "Buffer overrun");
 
-        if( l_bytes1 < p_buffer->i_buffer)
-        {   /* Compute the remaining buffer space to be written */
-            i_buf = i_buf - i_size - (l_bytes1 - i_size);
-            i_size = ( p_buffer->i_buffer - l_bytes1 < l_bytes2 ) ? p_buffer->i_buffer - l_bytes1 : l_bytes2;
-            memcpy( p_wrap_around, p_buffer->p_buffer + l_bytes1, i_size );
-            memset( (uint8_t*) p_wrap_around + i_size, 0, i_buf - i_size );
-        }
         block_Release( p_buffer );
     }
 
@@ -259,6 +258,8 @@ static HRESULT FillBuffer( vlc_object_t *obj, aout_stream_sys_t *p_sys,
 
     p_sys->i_write += towrite;
     p_sys->i_write %= DS_BUF_SIZE;
+    p_sys->i_data += towrite;
+    vlc_mutex_unlock( &p_sys->lock );
 
     return DS_OK;
 }
@@ -267,7 +268,6 @@ static HRESULT Play( vlc_object_t *obj, aout_stream_sys_t *sys,
                      block_t *p_buffer )
 {
     HRESULT dsresult;
-
     dsresult = FillBuffer( obj, sys, p_buffer );
     if( dsresult != DS_OK )
         return dsresult;
@@ -282,18 +282,29 @@ static HRESULT Play( vlc_object_t *obj, aout_stream_sys_t *sys,
                                             0, 0, DSBPLAY_LOOPING );
     }
     if( dsresult != DS_OK )
-        msg_Err( obj, "cannot start playing buffer" );
+        msg_Err( obj, "cannot start playing buffer: (hr=0x%lX)", dsresult );
+    else
+    {
+        vlc_mutex_lock( &sys->lock );
+        sys->b_playing = true;
+        vlc_cond_signal(&sys->cond);
+        vlc_mutex_unlock( &sys->lock );
+
+    }
     return dsresult;
 }
 
-static HRESULT StreamPlay( aout_stream_t *s, block_t *block )
+static HRESULT StreamPlay( aout_stream_t *s, block_t *block, vlc_tick_t date )
 {
+    (void) date;
     return Play( VLC_OBJECT(s), s->sys, block );
 }
 
-static void OutputPlay( audio_output_t *aout, block_t *block )
+static void OutputPlay( audio_output_t *aout, block_t *block, vlc_tick_t date )
 {
-    Play( VLC_OBJECT(aout), &aout->sys->s, block );
+    aout_sys_t *sys = aout->sys;
+    Play( VLC_OBJECT(aout), &sys->s, block );
+    (void) date;
 }
 
 static HRESULT Pause( aout_stream_sys_t *sys, bool pause )
@@ -304,6 +315,14 @@ static HRESULT Pause( aout_stream_sys_t *sys, bool pause )
         hr = IDirectSoundBuffer_Stop( sys->p_dsbuffer );
     else
         hr = IDirectSoundBuffer_Play( sys->p_dsbuffer, 0, 0, DSBPLAY_LOOPING );
+    if( hr == DS_OK )
+    {
+        vlc_mutex_lock( &sys->lock );
+        sys->b_playing = !pause;
+        if( sys->b_playing )
+            vlc_cond_signal( &sys->cond );
+        vlc_mutex_unlock( &sys->lock );
+    }
     return hr;
 }
 
@@ -312,15 +331,26 @@ static HRESULT StreamPause( aout_stream_t *s, bool pause )
     return Pause( s->sys, pause );
 }
 
-static void OutputPause( audio_output_t *aout, bool pause, mtime_t date )
+static void OutputPause( audio_output_t *aout, bool pause, vlc_tick_t date )
 {
-    Pause( &aout->sys->s, pause );
+    aout_sys_t *sys = aout->sys;
+    Pause( &sys->s, pause );
     (void) date;
 }
 
 static HRESULT Flush( aout_stream_sys_t *sys )
 {
-    return IDirectSoundBuffer_Stop( sys->p_dsbuffer );
+    HRESULT ret = IDirectSoundBuffer_Stop( sys->p_dsbuffer );
+    if( ret == DS_OK )
+    {
+        vlc_mutex_lock(&sys->lock);
+        sys->i_data = 0;
+        sys->i_last_read = sys->i_write;
+        IDirectSoundBuffer_SetCurrentPosition( sys->p_dsbuffer, sys->i_write);
+        sys->b_playing = false;
+        vlc_mutex_unlock(&sys->lock);
+    }
+    return ret;
 }
 
 static HRESULT StreamFlush( aout_stream_t *s )
@@ -328,13 +358,10 @@ static HRESULT StreamFlush( aout_stream_t *s )
     return Flush( s->sys );
 }
 
-static void OutputFlush( audio_output_t *aout, bool drain )
+static void OutputFlush( audio_output_t *aout )
 {
-    aout_stream_sys_t *sys = &aout->sys->s;
-
-    Flush( sys );
-    if( !drain )
-        IDirectSoundBuffer_SetCurrentPosition( sys->p_dsbuffer, sys->i_write );
+    aout_sys_t *sys = aout->sys;
+    Flush( &sys->s );
 }
 
 /**
@@ -490,7 +517,7 @@ static HRESULT CreateDSBufferPCM( vlc_object_t *obj, aout_stream_sys_t *sys,
                                   int i_rate, bool b_probe )
 {
     HRESULT hr;
-    unsigned i_nb_channels = popcount( i_channels );
+    unsigned i_nb_channels = vlc_popcount( i_channels );
 
     if( var_GetBool( obj, "directx-audio-float32" ) )
     {
@@ -519,6 +546,13 @@ static HRESULT CreateDSBufferPCM( vlc_object_t *obj, aout_stream_sys_t *sys,
  */
 static HRESULT Stop( aout_stream_sys_t *p_sys )
 {
+    vlc_mutex_lock( &p_sys->lock );
+    p_sys->b_playing =  true;
+    vlc_cond_signal( &p_sys->cond );
+    vlc_mutex_unlock( &p_sys->lock );
+    vlc_cancel( p_sys->eraser_thread );
+    vlc_join( p_sys->eraser_thread, NULL );
+
     if( p_sys->p_notify != NULL )
     {
         IDirectSoundNotify_Release(p_sys->p_notify );
@@ -538,24 +572,25 @@ static HRESULT Stop( aout_stream_sys_t *p_sys )
     return DS_OK;
 }
 
-static HRESULT StreamStop( aout_stream_t *s )
+static void StreamStop( aout_stream_t *s )
 {
-    HRESULT hr;
-
-    hr = Stop( s->sys );
+    Stop( s->sys );
     free( s->sys );
-    return hr;
 }
 
 static void OutputStop( audio_output_t *aout )
 {
     msg_Dbg( aout, "closing audio device" );
-    Stop( &aout->sys->s );
+    aout_sys_t *sys = aout->sys;
+    Stop( &sys->s );
 }
 
 static HRESULT Start( vlc_object_t *obj, aout_stream_sys_t *sys,
-                      audio_sample_format_t *restrict fmt )
+                      audio_sample_format_t *restrict pfmt )
 {
+    if( aout_FormatNbChannels( pfmt ) == 0 )
+        return E_FAIL;
+
 #if !VLC_WINSTORE_APP
     /* Set DirectSound Cooperative level, ie what control we want over Windows
      * sound device. In our case, DSSCL_EXCLUSIVE means that we can modify the
@@ -572,10 +607,14 @@ static HRESULT Start( vlc_object_t *obj, aout_stream_sys_t *sys,
         msg_Warn( obj, "cannot set direct sound cooperative level" );
 #endif
 
+    if( AOUT_FMT_HDMI( pfmt ) )
+        return E_FAIL;
+
+    audio_sample_format_t fmt = *pfmt;
     const char *const *ppsz_compare = speaker_list;
     char *psz_speaker;
     int i = 0;
-    HRESULT hr;
+    HRESULT hr = DSERR_UNSUPPORTED;
 
     /* Retrieve config values */
     var_Create( obj, "directx-audio-float32",
@@ -599,23 +638,28 @@ static HRESULT Start( vlc_object_t *obj, aout_stream_sys_t *sys,
     }
     free( psz_speaker );
 
-    if( AOUT_FMT_SPDIF( fmt ) && var_InheritBool( obj, "spdif" ) )
+    vlc_mutex_init(&sys->lock);
+    vlc_cond_init(&sys->cond);
+
+    if( AOUT_FMT_SPDIF( &fmt ) )
     {
-        hr = CreateDSBuffer( obj, sys, VLC_CODEC_SPDIFL,
-                             fmt->i_physical_channels,
-                             aout_FormatNbChannels(fmt), fmt->i_rate, false );
+        if( var_InheritBool( obj, "spdif" ) )
+            hr = CreateDSBuffer( obj, sys, VLC_CODEC_SPDIFL,
+                                 fmt.i_physical_channels,
+                                 aout_FormatNbChannels(&fmt), fmt.i_rate, false );
+
         if( hr == DS_OK )
         {
             msg_Dbg( obj, "using A/52 pass-through over S/PDIF" );
-            fmt->i_format = VLC_CODEC_SPDIFL;
+            fmt.i_format = VLC_CODEC_SPDIFL;
 
             /* Calculate the frame size in bytes */
-            fmt->i_bytes_per_frame = AOUT_SPDIF_SIZE;
-            fmt->i_frame_length = A52_FRAME_NB;
+            fmt.i_bytes_per_frame = AOUT_SPDIF_SIZE;
+            fmt.i_frame_length = A52_FRAME_NB;
         }
+        else
+            return E_FAIL;
     }
-    else
-        hr = DSERR_UNSUPPORTED;
 
     if( hr != DS_OK )
     {
@@ -623,7 +667,7 @@ static HRESULT Start( vlc_object_t *obj, aout_stream_sys_t *sys,
         {
             DWORD ui_speaker_config;
             int i_channels = 2; /* Default to stereo */
-            int i_orig_channels = aout_FormatNbChannels( fmt );
+            int i_orig_channels = aout_FormatNbChannels( &fmt );
 
             /* Check the speaker configuration to determine which channel
              * config should be the default */
@@ -679,18 +723,18 @@ static HRESULT Start( vlc_object_t *obj, aout_stream_sys_t *sys,
             switch( i_channels )
             {
                 case 8:
-                    fmt->i_physical_channels = AOUT_CHANS_7_1;
+                    fmt.i_physical_channels = AOUT_CHANS_7_1;
                     break;
                 case 7:
                 case 6:
-                    fmt->i_physical_channels = AOUT_CHANS_5_1;
+                    fmt.i_physical_channels = AOUT_CHANS_5_1;
                     break;
                 case 5:
                 case 4:
-                    fmt->i_physical_channels = AOUT_CHANS_4_0;
+                    fmt.i_physical_channels = AOUT_CHANS_4_0;
                     break;
                 default:
-                    fmt->i_physical_channels = AOUT_CHANS_2_0;
+                    fmt.i_physical_channels = AOUT_CHANS_2_0;
                     break;
             }
         }
@@ -701,33 +745,33 @@ static HRESULT Start( vlc_object_t *obj, aout_stream_sys_t *sys,
             {
                 case 1: /* Mono */
                     name = "Mono";
-                    fmt->i_physical_channels = AOUT_CHAN_CENTER;
+                    fmt.i_physical_channels = AOUT_CHAN_CENTER;
                     break;
                 case 2: /* Stereo */
                     name = "Stereo";
-                    fmt->i_physical_channels = AOUT_CHANS_2_0;
+                    fmt.i_physical_channels = AOUT_CHANS_2_0;
                     break;
                 case 3: /* Quad */
                     name = "Quad";
-                    fmt->i_physical_channels = AOUT_CHANS_4_0;
+                    fmt.i_physical_channels = AOUT_CHANS_4_0;
                     break;
                 case 4: /* 5.1 */
                     name = "5.1";
-                    fmt->i_physical_channels = AOUT_CHANS_5_1;
+                    fmt.i_physical_channels = AOUT_CHANS_5_1;
                     break;
                 case 5: /* 7.1 */
                     name = "7.1";
-                    fmt->i_physical_channels = AOUT_CHANS_7_1;
+                    fmt.i_physical_channels = AOUT_CHANS_7_1;
                     break;
             }
             msg_Dbg( obj, "%s speaker config: %s", "VLC", name );
         }
 
         /* Open the device */
-        aout_FormatPrepare( fmt );
+        aout_FormatPrepare( &fmt );
 
-        hr = CreateDSBufferPCM( obj, sys, &fmt->i_format,
-                                fmt->i_physical_channels, fmt->i_rate, false );
+        hr = CreateDSBufferPCM( obj, sys, &fmt.i_format,
+                                fmt.i_physical_channels, fmt.i_rate, false );
         if( hr != DS_OK )
         {
             msg_Err( obj, "cannot open directx audio device" );
@@ -735,11 +779,40 @@ static HRESULT Start( vlc_object_t *obj, aout_stream_sys_t *sys,
         }
     }
 
+    int ret = vlc_clone(&sys->eraser_thread, PlayedDataEraser, (void*) obj,
+                        VLC_THREAD_PRIORITY_LOW);
+    if( unlikely( ret ) )
+    {
+        if( ret != ENOMEM )
+            msg_Err( obj, "Couldn't start eraser thread" );
+
+        hr = E_FAIL;
+        goto error;
+    }
+
+    fmt.channel_type = AUDIO_CHANNEL_TYPE_BITMAP;
+
+    *pfmt = fmt;
+    sys->b_playing = false;
     sys->i_write = 0;
+    sys->i_last_read =  0;
+    sys->i_data = 0;
+
     return DS_OK;
 
 error:
-    Stop( sys );
+    if( sys->p_notify != NULL )
+    {
+        IDirectSoundNotify_Release( sys->p_notify );
+        sys->p_notify = NULL;
+    }
+    if( sys->p_dsbuffer != NULL )
+    {
+        IDirectSoundBuffer_Release( sys->p_dsbuffer );
+        sys->p_dsbuffer = NULL;
+    }
+    IDirectSound_Release( sys->p_dsobject );
+    sys->p_dsobject = NULL;
     return hr;
 }
 
@@ -747,24 +820,30 @@ static HRESULT StreamStart( aout_stream_t *s,
                             audio_sample_format_t *restrict fmt,
                             const GUID *sid )
 {
-    aout_stream_sys_t *sys = malloc( sizeof( *sys ) );
+    aout_stream_sys_t *sys = calloc( 1, sizeof( *sys ) );
     if( unlikely(sys == NULL) )
         return E_OUTOFMEMORY;
 
-    DIRECTX_AUDIO_ACTIVATION_PARAMS params = {
-        .cbDirectXAudioActivationParams = sizeof( params ),
-        .guidAudioSession = *sid,
-        .dwAudioStreamFlags = 0,
-    };
-    PROPVARIANT prop;
-
-    PropVariantInit( &prop );
-    prop.vt = VT_BLOB;
-    prop.blob.cbSize = sizeof( params );
-    prop.blob.pBlobData = (BYTE *)&params;
-
     void *pv;
-    HRESULT hr = aout_stream_Activate( s, &IID_IDirectSound, &prop, &pv );
+    HRESULT hr;
+    if( sid )
+    {
+        DIRECTX_AUDIO_ACTIVATION_PARAMS params = {
+            .cbDirectXAudioActivationParams = sizeof( params ),
+            .guidAudioSession = *sid,
+            .dwAudioStreamFlags = 0,
+        };
+        PROPVARIANT prop;
+
+        PropVariantInit( &prop );
+        prop.vt = VT_BLOB;
+        prop.blob.cbSize = sizeof( params );
+        prop.blob.pBlobData = (BYTE *)&params;
+
+        hr = aout_stream_Activate( s, &IID_IDirectSound, &prop, &pv );
+    }
+    else
+        hr = aout_stream_Activate( s, &IID_IDirectSound, NULL, &pv );
     if( FAILED(hr) )
         goto error;
 
@@ -772,16 +851,14 @@ static HRESULT StreamStart( aout_stream_t *s,
 
     hr = Start( VLC_OBJECT(s), sys, fmt );
     if( FAILED(hr) )
-    {
-        IDirectSound_Release( sys->p_dsobject );
         goto error;
-    }
 
     s->sys = sys;
     s->time_get = StreamTimeGet;
     s->play = StreamPlay;
     s->pause = StreamPause;
     s->flush = StreamFlush;
+    s->stop = StreamStop;
     return S_OK;
 error:
     free( sys );
@@ -795,16 +872,6 @@ static int InitDirectSound( audio_output_t *p_aout )
 {
     aout_sys_t *sys = p_aout->sys;
     GUID guid, *p_guid = NULL;
-    HRESULT (WINAPI *OurDirectSoundCreate)(LPGUID, LPDIRECTSOUND *, LPUNKNOWN);
-
-    OurDirectSoundCreate = (void *)
-        GetProcAddress( p_aout->sys->hdsound_dll,
-                        "DirectSoundCreate" );
-    if( OurDirectSoundCreate == NULL )
-    {
-        msg_Warn( p_aout, "GetProcAddress FAILED" );
-        goto error;
-    }
 
     char *dev = var_GetNonEmptyString( p_aout, "directx-audio-device" );
     if( dev != NULL )
@@ -820,7 +887,7 @@ static int InitDirectSound( audio_output_t *p_aout )
     }
 
     /* Create the direct sound object */
-    if FAILED( OurDirectSoundCreate( p_guid, &sys->s.p_dsobject, NULL ) )
+    if FAILED( DirectSoundCreate( p_guid, &sys->s.p_dsobject, NULL ) )
     {
         msg_Warn( p_aout, "cannot create a direct sound device" );
         goto error;
@@ -866,7 +933,7 @@ static int VolumeSet( audio_output_t *p_aout, float volume )
     aout_VolumeReport( p_aout, volume );
 
     if( var_InheritBool( p_aout, "volume-save" ) )
-        config_PutFloat( p_aout, "directx-volume", volume );
+        config_PutFloat( "directx-volume", volume );
     return ret;
 }
 
@@ -897,13 +964,14 @@ static int OutputStart( audio_output_t *p_aout,
         return -1;
     }
 
-    HRESULT hr = Start( VLC_OBJECT(p_aout), &p_aout->sys->s, fmt );
+    aout_sys_t *sys = p_aout->sys;
+    HRESULT hr = Start( VLC_OBJECT(p_aout), &sys->s, fmt );
     if( FAILED(hr) )
         return -1;
 
     /* Force volume update */
-    VolumeSet( p_aout, p_aout->sys->volume.volume );
-    MuteSet( p_aout, p_aout->sys->volume.mute );
+    VolumeSet( p_aout, sys->volume.volume );
+    MuteSet( p_aout, sys->volume.mute );
 
     /* then launch the notification thread */
     p_aout->time_get = OutputTimeGet;
@@ -931,12 +999,17 @@ static int CALLBACK DeviceEnumCallback( LPGUID guid, LPCWSTR desc,
         return true;
 
     list->count++;
-    list->ids = xrealloc( list->ids, list->count * sizeof(char *) );
-    list->names = xrealloc( list->names, list->count * sizeof(char *) );
+    list->ids = realloc_or_free( list->ids, list->count * sizeof(char *) );
+    if( list->ids == NULL )
+        return false;
+    list->names = realloc_or_free( list->names, list->count * sizeof(char *) );
+    if( list->names == NULL )
+    {
+        free( list->ids );
+        return false;
+    }
     list->ids[list->count - 1] = FromWide( buf );
     list->names[list->count - 1] = FromWide( desc );
-    if( list->ids == NULL || list->names == NULL )
-        abort();
 
     (void) mod;
     return true;
@@ -945,7 +1018,7 @@ static int CALLBACK DeviceEnumCallback( LPGUID guid, LPCWSTR desc,
 /**
  * Stores the list of devices in preferences
  */
-static int ReloadDirectXDevices( vlc_object_t *p_this, char const *psz_name,
+static int ReloadDirectXDevices( char const *psz_name,
                                  char ***values, char ***descs )
 {
     ds_list_t list = {
@@ -958,28 +1031,14 @@ static int ReloadDirectXDevices( vlc_object_t *p_this, char const *psz_name,
 
     (void) psz_name;
 
-    HANDLE hdsound_dll = LoadLibrary(_T("DSOUND.DLL"));
-    if( hdsound_dll == NULL )
-    {
-        msg_Warn( p_this, "cannot open DSOUND.DLL" );
-        goto out;
-    }
+    DirectSoundEnumerate( DeviceEnumCallback, &list );
 
-    /* Get DirectSoundEnumerate */
-    HRESULT (WINAPI *OurDirectSoundEnumerate)(LPDSENUMCALLBACKW, LPVOID) =
-            (void *)GetProcAddress( hdsound_dll, "DirectSoundEnumerateW" );
-    if( OurDirectSoundEnumerate != NULL )
-    {
-        OurDirectSoundEnumerate( DeviceEnumCallback, &list );
-        msg_Dbg( p_this, "found %u devices", list.count );
-    }
-    FreeLibrary(hdsound_dll);
-
-out:
     *values = list.ids;
     *descs = list.names;
     return list.count;
 }
+
+VLC_CONFIG_STRING_ENUM(ReloadDirectXDevices)
 
 static int DeviceSelect (audio_output_t *aout, const char *id)
 {
@@ -992,19 +1051,9 @@ static int DeviceSelect (audio_output_t *aout, const char *id)
 static int Open(vlc_object_t *obj)
 {
     audio_output_t *aout = (audio_output_t *)obj;
-
-    HINSTANCE hdsound_dll = LoadLibrary(_T("DSOUND.DLL"));
-    if (hdsound_dll == NULL)
-    {
-        msg_Warn(aout, "cannot open DSOUND.DLL");
-        return VLC_EGENERIC;
-    }
-
     aout_sys_t *sys = calloc(1, sizeof (*sys));
     if (unlikely(sys == NULL))
         return VLC_ENOMEM;
-
-    sys->hdsound_dll = hdsound_dll;
 
     aout->sys = sys;
     aout->start = OutputStart;
@@ -1020,7 +1069,8 @@ static int Open(vlc_object_t *obj)
 
     /* DirectSound does not support hot-plug events (unless with WASAPI) */
     char **ids, **names;
-    int count = ReloadDirectXDevices(obj, NULL, &ids, &names);
+    int count = ReloadDirectXDevices(NULL, &ids, &names);
+    msg_Dbg(obj, "found %d devices", count);
     if (count >= 0)
     {
         for (int i = 0; i < count; i++)
@@ -1046,6 +1096,80 @@ static void Close(vlc_object_t *obj)
     aout_sys_t *sys = aout->sys;
 
     var_Destroy(aout, "directx-audio-device");
-    FreeLibrary(sys->hdsound_dll); /* free DSOUND.DLL */
     free(sys);
+}
+
+static void * PlayedDataEraser( void * data )
+{
+    const audio_output_t *aout = (audio_output_t *) data;
+    aout_sys_t *aout_sys = aout->sys;
+    aout_stream_sys_t *p_sys = &aout_sys->s;
+    void *p_write_position, *p_wrap_around;
+    unsigned long l_bytes1, l_bytes2;
+    DWORD i_read;
+    int64_t toerase, tosleep;
+    vlc_tick_t ticksleep;
+    HRESULT dsresult;
+
+    for(;;)
+    {
+        int canc = vlc_savecancel();
+        vlc_mutex_lock( &p_sys->lock );
+
+        while( !p_sys->b_playing )
+           vlc_cond_wait( &p_sys->cond, &p_sys->lock );
+
+        toerase = 0;
+        tosleep = 0;
+        ticksleep = VLC_TICK_FROM_MS(20);
+
+        dsresult = IDirectSoundBuffer_GetCurrentPosition( p_sys->p_dsbuffer,
+                                                          &i_read, NULL );
+        if( dsresult == DS_OK )
+        {
+            int64_t max = (int64_t) i_read - (int64_t) p_sys->i_write;
+            tosleep = -max;
+            if( max <= 0 )
+                max += DS_BUF_SIZE;
+            else
+                tosleep += DS_BUF_SIZE;
+            toerase = max;
+            ticksleep = vlc_tick_from_sec( tosleep / p_sys->i_bytes_per_sample ) / p_sys->i_rate;
+        }
+
+        ticksleep = __MAX( ticksleep, VLC_TICK_FROM_MS(20) );
+        dsresult = IDirectSoundBuffer_Lock( p_sys->p_dsbuffer,
+                                            p_sys->i_write,
+                                            toerase,
+                                            &p_write_position,
+                                            &l_bytes1,
+                                            &p_wrap_around,
+                                            &l_bytes2,
+                                            0 );
+        if( dsresult == DSERR_BUFFERLOST )
+        {
+            IDirectSoundBuffer_Restore( p_sys->p_dsbuffer );
+            dsresult = IDirectSoundBuffer_Lock( p_sys->p_dsbuffer,
+                                                p_sys->i_write,
+                                                toerase,
+                                                &p_write_position,
+                                                &l_bytes1,
+                                                &p_wrap_around,
+                                                &l_bytes2,
+                                                0 );
+        }
+        if( dsresult != DS_OK )
+            goto wait;
+
+        memset( p_write_position, 0, l_bytes1 );
+        memset( p_wrap_around, 0, l_bytes2 );
+
+        IDirectSoundBuffer_Unlock( p_sys->p_dsbuffer, p_write_position, l_bytes1,
+                                   p_wrap_around, l_bytes2 );
+wait:
+        vlc_mutex_unlock(&p_sys->lock);
+        vlc_restorecancel(canc);
+        vlc_tick_sleep(ticksleep);
+    }
+    return NULL;
 }

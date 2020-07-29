@@ -71,7 +71,7 @@ vlc_module_begin ()
     set_description (N_("Screen capture (with X11/XCB)"))
     set_category (CAT_INPUT)
     set_subcategory (SUBCAT_INPUT_ACCESS)
-    set_capability ("access_demux", 0)
+    set_capability ("access", 0)
     set_callbacks (Open, Close)
 
     add_float ("screen-fps", 2.0, FPS_TEXT, FPS_LONGTEXT, true)
@@ -101,7 +101,7 @@ static int Control (demux_t *, int, va_list);
 static es_out_id_t *InitES (demux_t *, uint_fast16_t, uint_fast16_t,
                             uint_fast8_t, uint8_t *);
 
-struct demux_sys_t
+typedef struct
 {
     /* All owned by timer thread while timer is armed: */
     xcb_connection_t *conn; /**< XCB connection */
@@ -109,7 +109,9 @@ struct demux_sys_t
     float             rate; /**< Frame rate */
     xcb_window_t      window; /**< Captured window XID  */
     xcb_pixmap_t      pixmap; /**< Pixmap for composited capture */
+#ifdef HAVE_SYS_SHM_H
     xcb_shm_seg_t     segment; /**< SHM segment XID */
+#endif
     int16_t           x, y; /**< Requested capture top-left coordinates */
     uint16_t          w, h; /**< Requested capture pixel dimensions */
     uint8_t           bpp; /**< Actual bytes per pixel *es */
@@ -118,7 +120,7 @@ struct demux_sys_t
     uint16_t          cur_w, cur_h; /**< Actual capture pixel dimensions */
     /* Timer does not use this, only input thread: */
     vlc_timer_t       timer;
-};
+} demux_sys_t;
 
 /** Checks MIT-SHM shared memory support */
 static bool CheckSHM (xcb_connection_t *conn)
@@ -142,8 +144,10 @@ static bool CheckSHM (xcb_connection_t *conn)
 static int Open (vlc_object_t *obj)
 {
     demux_t *demux = (demux_t *)obj;
-    demux_sys_t *p_sys = malloc (sizeof (*p_sys));
+    if (demux->out == NULL)
+        return VLC_EGENERIC;
 
+    demux_sys_t *p_sys = malloc (sizeof (*p_sys));
     if (p_sys == NULL)
         return VLC_ENOMEM;
     demux->p_sys = p_sys;
@@ -161,7 +165,7 @@ static int Open (vlc_object_t *obj)
     p_sys->conn = conn;
 
    /* Find configured screen */
-    if (!strcmp (demux->psz_access, "screen"))
+    if (!strcasecmp(demux->psz_name, "screen"))
     {
         const xcb_setup_t *setup = xcb_get_setup (conn);
         const xcb_screen_t *scr = NULL;
@@ -184,7 +188,7 @@ static int Open (vlc_object_t *obj)
     }
     else
     /* Determine capture window */
-    if (!strcmp (demux->psz_access, "window"))
+    if (!strcasecmp(demux->psz_name, "window"))
     {
         char *end;
         unsigned long ul = strtoul (demux->psz_location, &end, 0);
@@ -216,7 +220,9 @@ static int Open (vlc_object_t *obj)
 
     /* Window properties */
     p_sys->pixmap = xcb_generate_id (conn);
+#ifdef HAVE_SYS_SHM_H
     p_sys->segment = xcb_generate_id (conn);
+#endif
     p_sys->shm = CheckSHM (conn);
     p_sys->w = var_InheritInteger (obj, "screen-width");
     p_sys->h = var_InheritInteger (obj, "screen-height");
@@ -235,7 +241,7 @@ static int Open (vlc_object_t *obj)
     if (!p_sys->rate)
         goto error;
 
-    mtime_t interval = (float)CLOCK_FREQ / p_sys->rate;
+    vlc_tick_t interval = (float)CLOCK_FREQ / p_sys->rate;
     if (!interval)
         goto error;
 
@@ -245,7 +251,7 @@ static int Open (vlc_object_t *obj)
     p_sys->es = NULL;
     if (vlc_timer_create (&p_sys->timer, Demux, demux))
         goto error;
-    vlc_timer_schedule (p_sys->timer, false, 1, interval);
+    vlc_timer_schedule_asap (p_sys->timer, interval);
 
     /* Initializes demux */
     demux->pf_demux   = NULL;
@@ -290,8 +296,7 @@ static int Control (demux_t *demux, int query, va_list args)
         case DEMUX_GET_LENGTH:
         case DEMUX_GET_TIME:
         {
-            int64_t *v = va_arg (args, int64_t *);
-            *v = 0;
+            *va_arg (args, vlc_tick_t *) = 0;
             return VLC_SUCCESS;
         }
 
@@ -299,8 +304,8 @@ static int Control (demux_t *demux, int query, va_list args)
 
         case DEMUX_GET_PTS_DELAY:
         {
-            int64_t *v = va_arg (args, int64_t *);
-            *v = INT64_C(1000) * var_InheritInteger (demux, "live-caching");
+            *va_arg (args, vlc_tick_t *) =
+                VLC_TICK_FROM_MS(var_InheritInteger (demux, "live-caching"));
             return VLC_SUCCESS;
         }
 
@@ -349,8 +354,8 @@ discard:
         return;
     }
 
-    int w = sys->w;
-    int h = sys->h;
+    unsigned w = sys->w;
+    unsigned h = sys->h;
     int x, y;
 
     if (sys->follow_mouse)
@@ -366,9 +371,9 @@ discard:
         if (w == 0 || w > geo->width)
             w = geo->width;
         x = ptr->win_x;
-        if (x < w / 2)
+        if (x < (int)(w / 2))
             x = 0;
-        else if (x >= (int)geo->width - (w / 2))
+        else if (x >= (int)(geo->width - (w / 2)))
             x = geo->width - w;
         else
             x -= w / 2;
@@ -376,9 +381,9 @@ discard:
         if (h == 0 || h > geo->height)
             h = geo->height;
         y = ptr->win_y;
-        if (y < h / 2)
+        if (y < (int)(h / 2))
             y = 0;
-        else if (y >= (int)geo->height - (h / 2))
+        else if (y >= (int)(geo->height - (h / 2)))
             y = geo->height - h;
         else
             y -= h / 2;
@@ -391,14 +396,14 @@ discard:
         max = (int)geo->width - x;
         if (max <= 0)
             goto discard;
-        if (w == 0 || w > max)
+        if (w == 0 || w > (unsigned)max)
             w = max;
 
         y = sys->y;
         max = (int)geo->height - y;
         if (max <= 0)
             goto discard;
-        if (h == 0 || h > max)
+        if (h == 0 || h > (unsigned)max)
             h = max;
     }
 
@@ -432,7 +437,7 @@ discard:
     free (geo);
 
     block_t *block = NULL;
-#if HAVE_SYS_SHM_H
+#ifdef HAVE_SYS_SHM_H
     if (sys->shm)
     {   /* Capture screen through shared memory */
         size_t size = w * h * sys->bpp;
@@ -500,11 +505,13 @@ noshm:
     /* Send block - zero copy */
     if (sys->es != NULL)
     {
-        block->i_pts = block->i_dts = mdate ();
+        block->i_pts = block->i_dts = vlc_tick_now ();
 
-        es_out_Control (demux->out, ES_OUT_SET_PCR, block->i_pts);
+        es_out_SetPCR(demux->out, block->i_pts);
         es_out_Send (demux->out, sys->es, block);
     }
+    else
+        block_Release (block);
 }
 
 static es_out_id_t *InitES (demux_t *demux, uint_fast16_t width,

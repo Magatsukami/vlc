@@ -2,7 +2,6 @@
  * evt_special.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -25,9 +24,9 @@
 #include "evt_special.hpp"
 
 
-const string EvtSpecial::getAsString() const
+const std::string EvtSpecial::getAsString() const
 {
-    string event = "special";
+    std::string event = "special";
 
     // Add the action
     if( m_action == kShow )

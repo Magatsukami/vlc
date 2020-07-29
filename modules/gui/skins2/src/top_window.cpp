@@ -2,7 +2,6 @@
  * top_window.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -47,8 +46,7 @@
 #include "../utils/position.hpp"
 #include "../utils/ustring.hpp"
 
-#include <vlc_keys.h>
-#include <vlc_input.h>
+#include <vlc_actions.h>
 #include <vlc_url.h>
 #include <list>
 
@@ -62,7 +60,7 @@ TopWindow::TopWindow( intf_thread_t *pIntf, int left, int top,
     m_rWindowManager( rWindowManager ),
     m_pActiveLayout( NULL ), m_pLastHitControl( NULL ),
     m_pCapturingControl( NULL ), m_pFocusControl( NULL ),
-    m_pDragControl( NULL ), m_currModifier( 0 )
+    m_pDragControl( NULL )
 {
     // Register as a moving window
     m_rWindowManager.registerWindow( *this );
@@ -207,32 +205,8 @@ void TopWindow::processEvent( EvtKey &rEvtKey )
     // Only do the action when the key is down
     if( rEvtKey.getKeyState() == EvtKey::kDown )
     {
-        //XXX not to be hardcoded!
-        // Ctrl-S = Change skin
-        if( (rEvtKey.getMod() & EvtInput::kModCtrl) &&
-            rEvtKey.getKey() == 's' )
-        {
-            CmdDlgChangeSkin cmd( getIntf() );
-            cmd.execute();
-            return;
-        }
-
-        //XXX not to be hardcoded!
-        // Ctrl-T = Toggle on top
-        if( (rEvtKey.getMod() & EvtInput::kModCtrl) &&
-            rEvtKey.getKey() == 't' )
-        {
-            CmdOnTop cmd( getIntf() );
-            cmd.execute();
-            return;
-        }
-
-        var_SetInteger( getIntf()->p_libvlc, "key-pressed",
-                        rEvtKey.getModKey() );
+        getIntf()->p_sys->p_dialogs->sendKey( rEvtKey.getModKey() );
     }
-
-    // Always store the modifier, which can be needed for scroll events.
-    m_currModifier = rEvtKey.getMod();
 }
 
 void TopWindow::processEvent( EvtScroll &rEvtScroll )
@@ -258,9 +232,9 @@ void TopWindow::processEvent( EvtScroll &rEvtScroll )
     {
         // Treat the scroll event as a hotkey plus current modifiers
         int i = (rEvtScroll.getDirection() == EvtScroll::kUp ?
-                 KEY_MOUSEWHEELUP : KEY_MOUSEWHEELDOWN) | m_currModifier;
+                 KEY_MOUSEWHEELUP : KEY_MOUSEWHEELDOWN) | rEvtScroll.getMod();
 
-        var_SetInteger( getIntf()->p_libvlc, "key-pressed", i );
+        getIntf()->p_sys->p_dialogs->sendKey( i );
     }
 }
 
@@ -279,24 +253,27 @@ void TopWindow::processEvent( EvtDragDrop &rEvtDragDrop )
     }
     else
     {
-        input_thread_t *pInput = getIntf()->p_sys->p_input;
         bool is_subtitle = false;
-        list<string> files = rEvtDragDrop.getFiles();
-        if( files.size() == 1 && pInput != NULL )
+        std::list<std::string> files = rEvtDragDrop.getFiles();
+        // one single media, try it as a subtitle add-on
+        if( files.size() == 1 )
         {
-            list<string>::const_iterator it = files.begin();
-            char* psz_file = make_path( it->c_str() );
-            if( psz_file )
-            {
-                is_subtitle = !input_AddSubtitleOSD( pInput, psz_file, true, true );
-                free( psz_file );
-            }
+            std::list<std::string>::const_iterator it = files.begin();
+            vlc_playlist_Lock( getPL() );
+            vlc_player_t *player = vlc_playlist_GetPlayer( getPL() );
+            is_subtitle =
+                !vlc_player_AddAssociatedMedia( player, SPU_ES, it->c_str(),
+                    true /*select*/, true /* OSD notify*/,
+                    true /*check subtitle extension */ );
+            vlc_playlist_Unlock( getPL() );
         }
+        // try it as a normal media mrl
         if( !is_subtitle )
         {
-            list<string>::const_iterator it = files.begin();
+            std::list<std::string>::const_iterator it = files.begin();
             for( bool first = true; it != files.end(); ++it, first = false )
             {
+                msg_Dbg( getIntf(),"Dropped item: %s", it->c_str() );
                 bool playOnDrop = m_playOnDrop && first;
                 CmdAddItem( getIntf(), it->c_str(), playOnDrop ).execute();
             }
@@ -382,13 +359,14 @@ void TopWindow::setActiveLayout( GenericLayout *pLayout )
     // Get the size of the layout and resize the window
     resize( pLayout->getWidth(), pLayout->getHeight() );
 
+    // The new layout is active
+    pLayout->getActiveVar().set( true );
+
     if( isVisible )
     {
         pLayout->onShow();
     }
 
-    // The new layout is active
-    pLayout->getActiveVar().set( true );
 }
 
 
@@ -506,8 +484,8 @@ CtrlGeneric *TopWindow::findHitControl( int xPos, int yPos )
     }
 
     // Get the controls in the active layout
-    const list<LayeredControl> &ctrlList = m_pActiveLayout->getControlList();
-    list<LayeredControl>::const_reverse_iterator iter;
+    const std::list<LayeredControl> &ctrlList = m_pActiveLayout->getControlList();
+    std::list<LayeredControl>::const_reverse_iterator iter;
 
     // New control hit by the mouse
     CtrlGeneric *pNewHitControl = NULL;

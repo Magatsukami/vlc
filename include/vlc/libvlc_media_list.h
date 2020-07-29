@@ -2,7 +2,6 @@
  * libvlc_media_list.h:  libvlc_media_list API
  *****************************************************************************
  * Copyright (C) 1998-2008 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Pierre d'Herbemont
  *
@@ -24,11 +23,6 @@
 #ifndef LIBVLC_MEDIA_LIST_H
 #define LIBVLC_MEDIA_LIST_H 1
 
-/**
- * \file
- * This file defines libvlc_media_list API
- */
-
 # ifdef __cplusplus
 extern "C" {
 # endif
@@ -37,6 +31,8 @@ extern "C" {
  * \ingroup libvlc
  * A LibVLC media list holds multiple @ref libvlc_media_t media descriptors.
  * @{
+ * \file
+ * LibVLC media list (playlist) external API
  */
 
 typedef struct libvlc_media_list_t libvlc_media_list_t;
@@ -44,11 +40,9 @@ typedef struct libvlc_media_list_t libvlc_media_list_t;
 /**
  * Create an empty media list.
  *
- * \param p_instance libvlc instance
  * \return empty media list, or NULL on error
  */
-LIBVLC_API libvlc_media_list_t *
-    libvlc_media_list_new( libvlc_instance_t *p_instance );
+LIBVLC_API libvlc_media_list_t *libvlc_media_list_new(void);
 
 /**
  * Release media list created with libvlc_media_list_new().
@@ -65,10 +59,6 @@ LIBVLC_API void
  */
 LIBVLC_API void
     libvlc_media_list_retain( libvlc_media_list_t *p_ml );
-
-LIBVLC_DEPRECATED int
-    libvlc_media_list_add_file_content( libvlc_media_list_t * p_ml,
-                                        const char * psz_uri );
 
 /**
  * Associate media instance with this media list instance.
@@ -166,12 +156,10 @@ LIBVLC_API int
  * This indicates if this media list is read-only from a user point of view
  *
  * \param p_ml media list instance
- * \return 1 on readonly, 0 on readwrite
- *
- * \libvlc_return_bool
+ * \retval true read-only
+ * \retval false read/write
  */
-LIBVLC_API int
-    libvlc_media_list_is_readonly( libvlc_media_list_t * p_ml );
+LIBVLC_API bool libvlc_media_list_is_readonly(libvlc_media_list_t *p_ml);
 
 /**
  * Get lock on media list items

@@ -4,7 +4,7 @@
  * Copyright © 2011-2012 VideoLAN
  *
  * Authors: Dominique Martinet <asmadeus@codewreck.org>
- *          Hugo Beauzée-Luyssen <beauze.h@gmail.com>
+ *          Hugo Beauzée-Luyssen <hugo@beauzee.fr>
  *          Rafaël Carré <funman@videolanorg>
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -41,20 +41,21 @@
 #include <SLES/OpenSLES.h>
 #include <SLES/OpenSLES_Android.h>
 
-int aout_get_native_sample_rate(void);
+#include <jni.h>
+JNIEnv *android_getEnv(vlc_object_t *p_obj, const char *psz_thread_name);
 
 #define OPENSLES_BUFFERS 255 /* maximum number of buffers */
-#define OPENSLES_BUFLEN  10   /* ms */
+#define OPENSLES_BUFLEN  VLC_TICK_FROM_MS(10)
 /*
  * 10ms of precision when mesasuring latency should be enough,
  * with 255 buffers we can buffer 2.55s of audio.
  */
 
-#define CHECK_OPENSL_ERROR(msg)                \
+#define CHECK_OPENSL_ERROR(msg) \
     if (unlikely(result != SL_RESULT_SUCCESS)) \
-    {                                          \
-        msg_Err(aout, msg" (%lu)", result);    \
-        goto error;                            \
+    { \
+        msg_Err(aout, msg" (%" PRIu32 ")", (uint32_t)result); \
+        goto error; \
     }
 
 typedef SLresult (*slCreateEngine_t)(
@@ -79,7 +80,7 @@ typedef SLresult (*slCreateEngine_t)(
 /*****************************************************************************
  *
  *****************************************************************************/
-struct aout_sys_t
+typedef struct
 {
     /* OpenSL objects */
     SLObjectItf                     engineObject;
@@ -117,7 +118,7 @@ struct aout_sys_t
     block_t                        *p_buffer_chain;
     block_t                       **pp_buffer_last;
     size_t                          samples;
-};
+} aout_sys_t;
 
 /*****************************************************************************
  * Local prototypes.
@@ -130,8 +131,8 @@ static void Close (vlc_object_t *);
  *****************************************************************************/
 
 vlc_module_begin ()
-    set_description(N_("OpenSLES audio output"))
-    set_shortname(N_("OpenSLES"))
+    set_description("OpenSLES audio output")
+    set_shortname("OpenSLES")
     set_category(CAT_AUDIO)
     set_subcategory(SUBCAT_AUDIO_AOUT)
 
@@ -149,14 +150,14 @@ static inline int bytesPerSample(void)
     return 2 /* S16 */ * 2 /* stereo */;
 }
 
-static int TimeGet(audio_output_t* aout, mtime_t* restrict drift)
+static int TimeGet(audio_output_t* aout, vlc_tick_t* restrict drift)
 {
     aout_sys_t *sys = aout->sys;
 
     SLAndroidSimpleBufferQueueState st;
     SLresult res = GetState(sys->playerBufferQueue, &st);
     if (unlikely(res != SL_RESULT_SUCCESS)) {
-        msg_Err(aout, "Could not query buffer queue state in TimeGet (%lu)", res);
+        msg_Err(aout, "Could not query buffer queue state in TimeGet (%" PRIu32 ")", (uint32_t)res);
         return -1;
     }
 
@@ -167,8 +168,8 @@ static int TimeGet(audio_output_t* aout, mtime_t* restrict drift)
     if (!started)
         return -1;
 
-    *drift = (CLOCK_FREQ * OPENSLES_BUFLEN * st.count / 1000)
-        + sys->samples * CLOCK_FREQ / sys->rate;
+    *drift = OPENSLES_BUFLEN * st.count
+        + vlc_tick_from_samples(sys->samples, sys->rate);
 
     /* msg_Dbg(aout, "latency %"PRId64" ms, %d/%d buffers", *drift / 1000,
         (int)st.count, OPENSLES_BUFFERS); */
@@ -176,35 +177,30 @@ static int TimeGet(audio_output_t* aout, mtime_t* restrict drift)
     return 0;
 }
 
-static void Flush(audio_output_t *aout, bool drain)
+static void Flush(audio_output_t *aout)
 {
     aout_sys_t *sys = aout->sys;
 
-    if (drain) {
-        mtime_t delay;
-        if (!TimeGet(aout, &delay))
-            msleep(delay);
-    } else {
-        vlc_mutex_lock(&sys->lock);
-        SetPlayState(sys->playerPlay, SL_PLAYSTATE_STOPPED);
-        Clear(sys->playerBufferQueue);
-        SetPlayState(sys->playerPlay, SL_PLAYSTATE_PLAYING);
+    vlc_mutex_lock(&sys->lock);
+    SetPlayState(sys->playerPlay, SL_PLAYSTATE_STOPPED);
+    Clear(sys->playerBufferQueue);
+    SetPlayState(sys->playerPlay, SL_PLAYSTATE_PLAYING);
 
-        /* release audio data not yet written to opensles */
-        block_ChainRelease(sys->p_buffer_chain);
-        sys->p_buffer_chain = NULL;
-        sys->pp_buffer_last = &sys->p_buffer_chain;
+    /* release audio data not yet written to opensles */
+    block_ChainRelease(sys->p_buffer_chain);
+    sys->p_buffer_chain = NULL;
+    sys->pp_buffer_last = &sys->p_buffer_chain;
 
-        sys->samples = 0;
-        sys->started = false;
+    sys->samples = 0;
+    sys->started = false;
 
-        vlc_mutex_unlock(&sys->lock);
-    }
+    vlc_mutex_unlock(&sys->lock);
 }
 
 static int VolumeSet(audio_output_t *aout, float vol)
 {
-    if (!aout->sys->volumeItf)
+    aout_sys_t *sys = aout->sys;
+    if (!sys->volumeItf)
         return -1;
 
     /* Convert UI volume to linear factor (cube) */
@@ -217,20 +213,21 @@ static int VolumeSet(audio_output_t *aout, float vol)
     else if (mb > 0)
         mb = 0; /* maximum supported level could be higher: GetMaxVolumeLevel */
 
-    SLresult r = SetVolumeLevel(aout->sys->volumeItf, mb);
+    SLresult r = SetVolumeLevel(sys->volumeItf, mb);
     return (r == SL_RESULT_SUCCESS) ? 0 : -1;
 }
 
 static int MuteSet(audio_output_t *aout, bool mute)
 {
-    if (!aout->sys->volumeItf)
+    aout_sys_t *sys = aout->sys;
+    if (!sys->volumeItf)
         return -1;
 
-    SLresult r = SetMute(aout->sys->volumeItf, mute);
+    SLresult r = SetMute(sys->volumeItf, mute);
     return (r == SL_RESULT_SUCCESS) ? 0 : -1;
 }
 
-static void Pause(audio_output_t *aout, bool pause, mtime_t date)
+static void Pause(audio_output_t *aout, bool pause, vlc_tick_t date)
 {
     (void)date;
     aout_sys_t *sys = aout->sys;
@@ -265,7 +262,8 @@ static int WriteBuffer(audio_output_t *aout)
     SLAndroidSimpleBufferQueueState st;
     SLresult res = GetState(sys->playerBufferQueue, &st);
     if (unlikely(res != SL_RESULT_SUCCESS)) {
-        msg_Err(aout, "Could not query buffer queue state in %s (%lu)", __func__, res);
+        msg_Err(aout, "Could not query buffer queue state in %s (%" PRIu32 ")",
+                __func__, (uint32_t)res);
         return false;
     }
 
@@ -310,8 +308,8 @@ static int WriteBuffer(audio_output_t *aout)
         return true;
     } else {
         /* XXX : if writing fails, we don't retry */
-        msg_Err(aout, "error %lu when writing %d bytes %s",
-                r, b->i_buffer,
+        msg_Err(aout, "error %" PRIu32 " when writing %zu bytes %s",
+                (uint32_t)r, b->i_buffer,
                 (r == SL_RESULT_BUFFER_INSUFFICIENT) ? " (buffer insufficient)" : "");
         return false;
     }
@@ -320,7 +318,7 @@ static int WriteBuffer(audio_output_t *aout)
 /*****************************************************************************
  * Play: play a sound
  *****************************************************************************/
-static void Play(audio_output_t *aout, block_t *p_buffer)
+static void Play(audio_output_t *aout, block_t *p_buffer, vlc_tick_t date)
 {
     aout_sys_t *sys = aout->sys;
 
@@ -337,6 +335,7 @@ static void Play(audio_output_t *aout, block_t *p_buffer)
         ;
 
     vlc_mutex_unlock(&sys->lock);
+    (void) date;
 }
 
 static void PlayedCallback (SLAndroidSimpleBufferQueueItf caller, void *pContext)
@@ -351,11 +350,36 @@ static void PlayedCallback (SLAndroidSimpleBufferQueueItf caller, void *pContext
     sys->started = true;
     vlc_mutex_unlock(&sys->lock);
 }
+
+static int aout_get_native_sample_rate(audio_output_t *aout)
+{
+    JNIEnv *p_env;
+    if (!(p_env = android_getEnv(VLC_OBJECT(aout), "opensles")))
+        return -1;
+    jclass cls = (*p_env)->FindClass (p_env, "android/media/AudioTrack");
+    if ((*p_env)->ExceptionCheck(p_env))
+    {
+        (*p_env)->ExceptionClear(p_env);
+        return -1;
+    }
+    jmethodID method = (*p_env)->GetStaticMethodID(p_env, cls,
+                                                   "getNativeOutputSampleRate",
+                                                   "(I)I");
+    /* 3 for AudioManager.STREAM_MUSIC */
+    int sample_rate = (*p_env)->CallStaticIntMethod(p_env, cls, method, 3);
+    (*p_env)->DeleteLocalRef(p_env, cls);
+    msg_Dbg(aout, "%s: %d", __func__, sample_rate);
+    return sample_rate;
+}
+
 /*****************************************************************************
  *
  *****************************************************************************/
 static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
 {
+    if (aout_FormatNbChannels(fmt) == 0 || !AOUT_FMT_LINEAR(fmt))
+        return VLC_EGENERIC;
+
     SLresult       result;
 
     aout_sys_t *sys = aout->sys;
@@ -388,7 +412,7 @@ static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
     const SLInterfaceID ids2[] = { sys->SL_IID_ANDROIDSIMPLEBUFFERQUEUE, sys->SL_IID_VOLUME };
     static const SLboolean req2[] = { SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE };
 
-    if (aout_get_native_sample_rate() >= fmt->i_rate) {
+    if (aout_get_native_sample_rate(aout) >= (int)fmt->i_rate) {
         result = CreateAudioPlayer(sys->engineEngine, &sys->playerObject, &audioSrc,
                                     &audioSnk, sizeof(ids2) / sizeof(*ids2),
                                     ids2, req2);
@@ -434,8 +458,8 @@ static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
 
     /* XXX: rounding shouldn't affect us at normal sampling rate */
     sys->rate = fmt->i_rate;
-    sys->samples_per_buf = OPENSLES_BUFLEN * fmt->i_rate / 1000;
-    sys->buf = malloc(OPENSLES_BUFFERS * sys->samples_per_buf * bytesPerSample());
+    sys->samples_per_buf = samples_from_vlc_tick(OPENSLES_BUFLEN, fmt->i_rate);
+    sys->buf = vlc_alloc(sys->samples_per_buf * bytesPerSample(), OPENSLES_BUFFERS);
     if (!sys->buf)
         goto error;
 
@@ -449,8 +473,9 @@ static int Start(audio_output_t *aout, audio_sample_format_t *restrict fmt)
     // we want 16bit signed data native endian.
     fmt->i_format              = VLC_CODEC_S16N;
     fmt->i_physical_channels   = AOUT_CHAN_LEFT | AOUT_CHAN_RIGHT;
+    fmt->channel_type = AUDIO_CHANNEL_TYPE_BITMAP;
 
-    SetPositionUpdatePeriod(sys->playerPlay, AOUT_MIN_PREPARE_TIME * 1000 / CLOCK_FREQ);
+    SetPositionUpdatePeriod(sys->playerPlay, MS_FROM_VLC_TICK(AOUT_MIN_PREPARE_TIME));
 
     aout_FormatPrepare(fmt);
 
@@ -460,6 +485,9 @@ error:
     if (sys->playerObject) {
         Destroy(sys->playerObject);
         sys->playerObject = NULL;
+        sys->playerBufferQueue = NULL;
+        sys->volumeItf = NULL;
+        sys->playerPlay = NULL;
     }
 
     return VLC_EGENERIC;
@@ -478,6 +506,9 @@ static void Stop(audio_output_t *aout)
 
     Destroy(sys->playerObject);
     sys->playerObject = NULL;
+    sys->playerBufferQueue = NULL;
+    sys->volumeItf = NULL;
+    sys->playerPlay = NULL;
 }
 
 /*****************************************************************************
@@ -491,7 +522,6 @@ static void Close(vlc_object_t *obj)
     Destroy(sys->outputMixObject);
     Destroy(sys->engineObject);
     dlclose(sys->p_so_handle);
-    vlc_mutex_destroy(&sys->lock);
     free(sys);
 }
 

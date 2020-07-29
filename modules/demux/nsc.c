@@ -2,7 +2,6 @@
  * nsc.c: NSC file demux and encoding decoder
  *****************************************************************************
  * Copyright (C) 2005 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Derk-Jan Hartman <hartman at videolan dot org>
  *          based on work from Jon Lech Johansen <jon@nanocrew.net>
@@ -197,7 +196,7 @@ static char *nscdec( vlc_object_t *p_demux, char* p_encoded )
             msg_Err( p_demux, "load_byte failed" );
             return NULL;
         }
-        length |= tmp << ((i - 1) * 8);
+        length |= (unsigned int)tmp << ((i - 1) * 8);
     }
 
     if( length == 0 )
@@ -237,7 +236,7 @@ static int DemuxOpen( vlc_object_t * p_this )
     int i_size;
 
     /* Lets check the content to see if this is a NSC file */
-    i_size = stream_Peek( p_demux->s, &p_peek, MAX_LINE );
+    i_size = vlc_stream_Peek( p_demux->s, &p_peek, MAX_LINE );
     i_size -= sizeof("NSC Format Version=") - 1;
 
     if ( i_size > 0 )
@@ -322,7 +321,7 @@ static int Demux ( demux_t *p_demux )
 {
     char            *psz_line;
 
-    while( ( psz_line = stream_ReadLine( p_demux->s ) ) )
+    while( ( psz_line = vlc_stream_ReadLine( p_demux->s ) ) )
     {
         ParseLine( p_demux, psz_line );
         free( psz_line );

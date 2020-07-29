@@ -2,7 +2,6 @@
  * equalizer.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *
@@ -40,7 +39,7 @@ public:
 
     /// Set the equalizer bands from a configuration string,
     /// e.g. "1 5.2 -3.6 0 0 2.5 0 0 0 0"
-    void set( string bands );
+    void set( std::string bands );
 
     /// Return the variable for a specific band
     VariablePtr getBand( int band );

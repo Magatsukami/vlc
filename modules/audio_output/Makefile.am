@@ -4,9 +4,9 @@ aout_LTLIBRARIES =
 libopensles_android_plugin_la_SOURCES = audio_output/opensles_android.c
 libopensles_android_plugin_la_LIBADD = $(LIBDL) $(LIBM)
 
-libandroid_audiotrack_plugin_la_SOURCES = audio_output/audiotrack.c
-libandroid_audiotrack_plugin_la_CPPFLAGS = $(AM_CPPFLAGS)
-libandroid_audiotrack_plugin_la_LIBADD = $(LIBDL)
+libandroid_audiotrack_plugin_la_SOURCES = audio_output/audiotrack.c \
+	video_output/android/utils.c video_output/android/utils.h
+libandroid_audiotrack_plugin_la_CFLAGS = $(AM_CFLAGS)
 
 if HAVE_ANDROID
 aout_LTLIBRARIES += libandroid_audiotrack_plugin.la libopensles_android_plugin.la
@@ -38,15 +38,17 @@ aout_LTLIBRARIES += libalsa_plugin.la
 endif
 
 libvlc_pulse_la_SOURCES = audio_output/vlcpulse.c audio_output/vlcpulse.h
-libvlc_pulse_la_CPPFLAGS = -DMODULE_STRING=\"pulse\"
 libvlc_pulse_la_CFLAGS = $(AM_CFLAGS) $(PULSE_CFLAGS)
-libvlc_pulse_la_LDFLAGS = -static
-libvlc_pulse_la_LIBADD = $(PULSE_LIBS)
+libvlc_pulse_la_LIBADD = $(PULSE_LIBS) $(LTLIBVLCCORE)
+libvlc_pulse_la_LDFLAGS = \
+	-no-undefined \
+	-export-symbols-regex ^vlc_pa_ \
+	-version-info 0:0:0
 libpulse_plugin_la_SOURCES = audio_output/pulse.c
 libpulse_plugin_la_CFLAGS = $(AM_CFLAGS) $(PULSE_CFLAGS)
 libpulse_plugin_la_LIBADD = libvlc_pulse.la $(PULSE_LIBS) $(LIBM)
 if HAVE_PULSE
-noinst_LTLIBRARIES += libvlc_pulse.la
+pkglib_LTLIBRARIES += libvlc_pulse.la
 aout_LTLIBRARIES += libpulse_plugin.la
 endif
 
@@ -58,17 +60,24 @@ aout_LTLIBRARIES += libjack_plugin.la
 endif
 
 libmmdevice_plugin_la_SOURCES = audio_output/mmdevice.c audio_output/mmdevice.h
-libmmdevice_plugin_la_LIBADD = -lole32 $(LIBM)
+libmmdevice_plugin_la_LIBADD = $(LIBCOM) $(LIBM)
+libwinstore_plugin_la_SOURCES = audio_output/winstore.c audio_output/mmdevice.h
+libwinstore_plugin_la_LIBADD = $(LIBCOM) -lmmdevapi
 libwasapi_plugin_la_SOURCES = audio_output/wasapi.c
-libwasapi_plugin_la_LIBADD = -lole32 -lksuser
+libwasapi_plugin_la_LIBADD = $(LIBCOM) -lksuser
 if HAVE_WASAPI
-aout_LTLIBRARIES += libmmdevice_plugin.la libwasapi_plugin.la
+aout_LTLIBRARIES += libwasapi_plugin.la
+if !HAVE_WINSTORE
+aout_LTLIBRARIES += libmmdevice_plugin.la
+else
+aout_LTLIBRARIES += libwinstore_plugin.la
+endif
 endif
 
 libdirectsound_plugin_la_SOURCES = audio_output/directsound.c \
 	audio_output/windows_audio_common.h
-libdirectsound_plugin_la_LIBADD = -lole32
-if HAVE_DIRECTX
+libdirectsound_plugin_la_LIBADD = -ldsound $(LIBCOM)
+if HAVE_WIN32_DESKTOP
 aout_LTLIBRARIES += libdirectsound_plugin.la
 endif
 
@@ -79,7 +88,7 @@ aout_LTLIBRARIES += libkai_plugin.la
 endif
 
 libsndio_plugin_la_SOURCES = audio_output/sndio.c
-libsndio_plugin_la_LIBADD = -lsndio
+libsndio_plugin_la_LIBADD = -lsndio $(LIBM)
 if HAVE_SNDIO
 aout_LTLIBRARIES += libsndio_plugin.la
 endif
@@ -87,17 +96,24 @@ endif
 libwaveout_plugin_la_SOURCES = audio_output/waveout.c \
 	audio_output/windows_audio_common.h
 libwaveout_plugin_la_LIBADD = -lwinmm
-if HAVE_WIN32
+if HAVE_WIN32_DESKTOP
 aout_LTLIBRARIES += libwaveout_plugin.la
 endif
 
 libauhal_plugin_la_SOURCES = audio_output/auhal.c \
-	audio_output/TPCircularBuffer.h audio_output/TPCircularBuffer.c
-libauhal_plugin_la_LDFLAGS = $(AM_LDFLAGS) -Wl,-framework,CoreAudio,-framework,AudioUnit,-framework,AudioToolbox,-framework,CoreServices -rpath '$(aoutdir)'
-libaudiounit_ios_plugin_la_SOURCES = audio_output/audiounit_ios.c \
-	audio_output/TPCircularBuffer.h audio_output/TPCircularBuffer.c
-libaudiounit_ios_plugin_la_LDFLAGS = $(libauhal_plugin_la_LDFLAGS)
-libaudioqueue_plugin_la_SOURCES = audio_output/audioqueue.c
-libaudioqueue_plugin_la_LDFLAGS = $(AM_LDFLAGS) -Wl,-framework,CoreAudio,-framework,AudioUnit,-framework,AudioToolbox,-framework,CoreServices -rpath '$(aoutdir)'
-EXTRA_LTLIBRARIES += libauhal_plugin.la libaudiounit_ios_plugin.la libaudioqueue_plugin.la
-aout_LTLIBRARIES += $(LTLIBauhal) $(LTLIBaudiounit_ios) $(LTLIBaudioqueue)
+	audio_output/coreaudio_common.c audio_output/coreaudio_common.h
+libauhal_plugin_la_LDFLAGS = $(AM_LDFLAGS) -rpath '$(aoutdir)' \
+	-Wl,-framework,CoreAudio,-framework,AudioUnit,-framework,AudioToolbox,-framework,CoreServices
+if HAVE_OSX
+aout_LTLIBRARIES += libauhal_plugin.la
+endif
+libaudiounit_ios_plugin_la_SOURCES = audio_output/audiounit_ios.m \
+	audio_output/coreaudio_common.c audio_output/coreaudio_common.h
+libaudiounit_ios_plugin_la_LDFLAGS = $(AM_LDFLAGS) -rpath '$(aoutdir)' \
+	-Wl,-framework,Foundation,-framework,CoreAudio,-framework,AudioToolbox,-framework,UIKit,-framework,AVFoundation
+if HAVE_IOS
+aout_LTLIBRARIES += libaudiounit_ios_plugin.la
+endif
+if HAVE_TVOS
+aout_LTLIBRARIES += libaudiounit_ios_plugin.la
+endif

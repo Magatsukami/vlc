@@ -2,7 +2,6 @@
  * ctrl_image.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -51,7 +50,7 @@ CtrlImage::CtrlImage( intf_thread_t *pIntf, GenericBitmap &rBitmap,
         pVlcProc->getStreamArtVar().addObserver( this );
 
         // retrieve initial state of art file
-        string str = pVlcProc->getStreamArtVar().get();
+        std::string str = pVlcProc->getStreamArtVar().get();
         GenericBitmap* pArt = (GenericBitmap*) pArtManager->getArtBitmap( str );
         if( pArt )
         {
@@ -258,7 +257,7 @@ void CtrlImage::onUpdate( Subject<VarString> &rVariable, void* arg )
 
     if( &rVariable == &pVlcProc->getStreamArtVar() )
     {
-        string str = ((VarString&)rVariable).get();
+        std::string str = ((VarString&)rVariable).get();
         ArtManager* pArtManager = ArtManager::instance( getIntf() );
         GenericBitmap* pArt = (GenericBitmap*) pArtManager->getArtBitmap( str );
 

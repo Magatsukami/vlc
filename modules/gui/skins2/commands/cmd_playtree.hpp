@@ -2,7 +2,6 @@
  * cmd_playtree.hpp
  *****************************************************************************
  * Copyright (C) 2005 the VideoLAN team
- * $Id$
  *
  * Authors: Antoine Cellerier <dionoea@videolan.org>
  *          Clément Stenac <zorglub@videolan.org>
@@ -38,12 +37,15 @@ public:
                   : CmdGeneric( pIntf ), m_rTree( rTree ) { }
     virtual ~CmdPlaytreeDel() { }
     virtual void execute();
-    virtual string getType() const { return "playtree del"; }
+    virtual std::string getType() const { return "playtree del"; }
 
 private:
     /// Tree
     VarTree &m_rTree;
 };
+
+/// Command to reset the playtree
+DEFINE_COMMAND( PlaytreeReset, "playtree reset" )
 
 /// Command to sort the playtree
 DEFINE_COMMAND( PlaytreeSort, "playtree sort" )

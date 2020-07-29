@@ -2,7 +2,6 @@
  * stream_memory.c: stream_t wrapper around memory buffer
  *****************************************************************************
  * Copyright (C) 1999-2008 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Sigmund Augdal Helberg <dnumgis@videolan.org>
  *
@@ -25,67 +24,96 @@
 # include "config.h"
 #endif
 
+#include <vlc_input.h>
 #include "stream.h"
 
-struct stream_sys_t
+struct vlc_stream_memory_private
 {
-    bool  i_preserve_memory;
-    uint64_t    i_pos;      /* Current reading offset */
-    uint64_t    i_size;
-    uint8_t    *p_buffer;
-
+    size_t    i_pos;      /* Current reading offset */
+    size_t    i_size;
+    uint8_t  *p_buffer;
 };
 
-static int  Read   ( stream_t *, void *p_read, unsigned int i_read );
-static int  Peek   ( stream_t *, const uint8_t **pp_peek, unsigned int i_read );
-static int  Control( stream_t *, int i_query, va_list );
-static void Delete ( stream_t * );
-
-#undef stream_MemoryNew
-/**
- * Create a stream from a memory buffer
- *
- * \param p_this the calling vlc_object
- * \param p_buffer the memory buffer for the stream
- * \param i_buffer the size of the buffer
- * \param i_preserve_memory if this is set to false the memory buffer
- *        pointed to by p_buffer is freed on stream_Destroy
- */
-stream_t *stream_MemoryNew( vlc_object_t *p_this, uint8_t *p_buffer,
-                            uint64_t i_size, bool i_preserve_memory )
+struct vlc_stream_attachment_private
 {
-    stream_t *s = stream_CommonNew( p_this );
-    stream_sys_t *p_sys;
+    struct vlc_stream_memory_private memory;
+    input_attachment_t *attachment;
+};
 
-    if( !s )
+static ssize_t Read( stream_t *, void *p_read, size_t i_read );
+static int Seek( stream_t *, uint64_t );
+static int  Control( stream_t *, int i_query, va_list );
+
+static void stream_MemoryPreserveDelete(stream_t *s)
+{
+    (void) s; /* nothing to do */
+}
+
+static void stream_MemoryDelete(stream_t *s)
+{
+    struct vlc_stream_memory_private *sys = vlc_stream_Private(s);
+
+    free(sys->p_buffer);
+}
+
+static void stream_AttachmentDelete(stream_t *s)
+{
+    struct vlc_stream_attachment_private *sys = vlc_stream_Private(s);
+
+    vlc_input_attachment_Delete(sys->attachment);
+    free(s->psz_name);
+}
+
+stream_t *(vlc_stream_MemoryNew)(vlc_object_t *p_this, uint8_t *p_buffer,
+                                 size_t i_size, bool preserve)
+{
+    struct vlc_stream_memory_private *p_sys;
+    stream_t *s = vlc_stream_CustomNew(p_this,
+                                       preserve ? stream_MemoryPreserveDelete
+                                                : stream_MemoryDelete,
+                                       sizeof (*p_sys), "stream");
+    if (unlikely(s == NULL))
         return NULL;
 
-    s->psz_path = strdup( "" ); /* N/A */
-    s->p_sys = p_sys = malloc( sizeof( stream_sys_t ) );
-    if( !s->psz_path || !s->p_sys )
-    {
-        stream_CommonDelete( s );
-        return NULL;
-    }
+    p_sys = vlc_stream_Private(s);
     p_sys->i_pos = 0;
     p_sys->i_size = i_size;
     p_sys->p_buffer = p_buffer;
-    p_sys->i_preserve_memory = i_preserve_memory;
 
     s->pf_read    = Read;
-    s->pf_peek    = Peek;
+    s->pf_seek    = Seek;
     s->pf_control = Control;
-    s->pf_destroy = Delete;
-    s->p_input = NULL;
 
     return s;
 }
 
-static void Delete( stream_t *s )
+stream_t *vlc_stream_AttachmentNew(vlc_object_t *p_this,
+                                   input_attachment_t *attachment)
 {
-    if( !s->p_sys->i_preserve_memory ) free( s->p_sys->p_buffer );
-    free( s->p_sys );
-    stream_CommonDelete( s );
+    struct vlc_stream_attachment_private *p_sys;
+    stream_t *s = vlc_stream_CustomNew(p_this, stream_AttachmentDelete,
+                                       sizeof (*p_sys), "stream");
+    if (unlikely(s == NULL))
+        return NULL;
+
+    s->psz_name = strdup("attachment");
+    if (unlikely(s->psz_name == NULL))
+    {
+        stream_CommonDelete(s);
+        return NULL;
+    }
+
+    p_sys = vlc_stream_Private(s);
+    p_sys->memory.i_pos = 0;
+    p_sys->memory.i_size = attachment->i_data;
+    p_sys->memory.p_buffer = attachment->p_data;
+    p_sys->attachment = attachment;
+
+    s->pf_read    = Read;
+    s->pf_seek    = Seek;
+    s->pf_control = Control;
+
+    return s;
 }
 
 /****************************************************************************
@@ -93,9 +121,9 @@ static void Delete( stream_t *s )
  ****************************************************************************/
 static int Control( stream_t *s, int i_query, va_list args )
 {
-    stream_sys_t *p_sys = s->p_sys;
+    struct vlc_stream_memory_private *p_sys = vlc_stream_Private(s);
 
-    uint64_t   *pi_64, i_64;
+    uint64_t   *pi_64;
 
     switch( i_query )
     {
@@ -111,19 +139,8 @@ static int Control( stream_t *s, int i_query, va_list args )
             *va_arg( args, bool * ) = true;
             break;
 
-        case STREAM_GET_POSITION:
-            pi_64 = va_arg( args, uint64_t * );
-            *pi_64 = p_sys->i_pos;
-            break;
-
-        case STREAM_SET_POSITION:
-            i_64 = va_arg( args, uint64_t );
-            i_64 = __MIN( i_64, s->p_sys->i_size );
-            p_sys->i_pos = i_64;
-            break;
-
         case STREAM_GET_PTS_DELAY:
-            *va_arg( args, int64_t * ) = 0;
+            *va_arg( args, vlc_tick_t * ) = 0;
             break;
 
         case STREAM_GET_TITLE_INFO:
@@ -147,25 +164,31 @@ static int Control( stream_t *s, int i_query, va_list args )
             return VLC_EGENERIC;
 
         default:
-            msg_Err( s, "invalid stream_vaControl query=0x%x", i_query );
+            msg_Err( s, "invalid vlc_stream_vaControl query=0x%x", i_query );
             return VLC_EGENERIC;
     }
     return VLC_SUCCESS;
 }
 
-static int Read( stream_t *s, void *p_read, unsigned int i_read )
+static ssize_t Read( stream_t *s, void *p_read, size_t i_read )
 {
-    stream_sys_t *p_sys = s->p_sys;
-    int i_res = __MIN( i_read, p_sys->i_size - p_sys->i_pos );
-    memcpy( p_read, p_sys->p_buffer + p_sys->i_pos, i_res );
-    p_sys->i_pos += i_res;
-    return i_res;
+    struct vlc_stream_memory_private *p_sys = vlc_stream_Private(s);
+
+    if( i_read > p_sys->i_size - p_sys->i_pos )
+        i_read = p_sys->i_size - p_sys->i_pos;
+    if ( p_read )
+        memcpy( p_read, p_sys->p_buffer + p_sys->i_pos, i_read );
+    p_sys->i_pos += i_read;
+    return i_read;
 }
 
-static int Peek( stream_t *s, const uint8_t **pp_peek, unsigned int i_read )
+static int Seek( stream_t *s, uint64_t offset )
 {
-    stream_sys_t *p_sys = s->p_sys;
-    int i_res = __MIN( i_read, p_sys->i_size - p_sys->i_pos );
-    *pp_peek = p_sys->p_buffer + p_sys->i_pos;
-    return i_res;
+    struct vlc_stream_memory_private *p_sys = vlc_stream_Private(s);
+
+    if( offset > p_sys->i_size )
+        offset = p_sys->i_size;
+
+    p_sys->i_pos = offset;
+    return VLC_SUCCESS;
 }

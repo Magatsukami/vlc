@@ -2,7 +2,6 @@
  * core.c: Core libvlc new API functions : initialization
  *****************************************************************************
  * Copyright (C) 2005 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Clément Stenac <zorglub@videolan.org>
  *
@@ -27,18 +26,14 @@
 
 #include "libvlc_internal.h"
 #include <vlc_modules.h>
-#include <vlc/libvlc.h>
+#include <vlc/vlc.h>
 
 #include <vlc_interface.h>
-#include <vlc_vlm.h>
 
 #include <stdarg.h>
 #include <limits.h>
 #include <assert.h>
 
-#include "../src/revision.c"
-
-static const char nomemstr[] = "Insufficient memory";
 
 libvlc_instance_t * libvlc_new( int argc, const char *const *argv )
 {
@@ -65,12 +60,8 @@ libvlc_instance_t * libvlc_new( int argc, const char *const *argv )
     }
 
     p_new->p_libvlc_int = p_libvlc_int;
-    p_new->libvlc_vlm.p_vlm = NULL;
-    p_new->libvlc_vlm.p_event_manager = NULL;
-    p_new->libvlc_vlm.pf_release = NULL;
-    p_new->ref_count = 1;
+    vlc_atomic_rc_init( &p_new->ref_count );
     p_new->p_callback_list = NULL;
-    vlc_mutex_init(&p_new->instance_lock);
     return p_new;
 
 error:
@@ -82,28 +73,15 @@ error:
 void libvlc_retain( libvlc_instance_t *p_instance )
 {
     assert( p_instance != NULL );
-    assert( p_instance->ref_count < UINT_MAX );
 
-    vlc_mutex_lock( &p_instance->instance_lock );
-    p_instance->ref_count++;
-    vlc_mutex_unlock( &p_instance->instance_lock );
+    vlc_atomic_rc_inc( &p_instance->ref_count );
 }
 
 void libvlc_release( libvlc_instance_t *p_instance )
 {
-    vlc_mutex_t *lock = &p_instance->instance_lock;
-    int refs;
-
-    vlc_mutex_lock( lock );
-    assert( p_instance->ref_count > 0 );
-    refs = --p_instance->ref_count;
-    vlc_mutex_unlock( lock );
-
-    if( refs == 0 )
+    if(vlc_atomic_rc_dec( &p_instance->ref_count ))
     {
-        vlc_mutex_destroy( lock );
-        if( p_instance->libvlc_vlm.pf_release )
-            p_instance->libvlc_vlm.pf_release( p_instance );
+        libvlc_Quit( p_instance->p_libvlc_int );
         libvlc_InternalCleanup( p_instance->p_libvlc_int );
         libvlc_InternalDestroy( p_instance->p_libvlc_int );
         free( p_instance );
@@ -116,22 +94,6 @@ void libvlc_set_exit_handler( libvlc_instance_t *p_i, void (*cb) (void *),
 {
     libvlc_int_t *p_libvlc = p_i->p_libvlc_int;
     libvlc_SetExitHandler( p_libvlc, cb, data );
-}
-
-static void libvlc_wait_wakeup( void *data )
-{
-    vlc_sem_post( data );
-}
-
-void libvlc_wait( libvlc_instance_t *p_i )
-{
-    vlc_sem_t sem;
-
-    vlc_sem_init( &sem, 0 );
-    libvlc_set_exit_handler( p_i, libvlc_wait_wakeup, &sem );
-    vlc_sem_wait( &sem );
-    libvlc_set_exit_handler( p_i, NULL, NULL );
-    vlc_sem_destroy( &sem );
 }
 
 void libvlc_set_user_agent (libvlc_instance_t *p_i,
@@ -156,7 +118,7 @@ void libvlc_set_app_id(libvlc_instance_t *p_i, const char *id,
 
     var_SetString(p_libvlc, "app-id", id ? id : "");
     var_SetString(p_libvlc, "app-version", version ? version : "");
-    var_SetString(p_libvlc, "app-version", icon ? icon : "");
+    var_SetString(p_libvlc, "app-icon-name", icon ? icon : "");
 }
 
 const char * libvlc_get_version(void)
@@ -252,10 +214,12 @@ libvlc_module_description_t *libvlc_audio_filter_list_get( libvlc_instance_t *p_
 
 libvlc_module_description_t *libvlc_video_filter_list_get( libvlc_instance_t *p_instance )
 {
-    return module_description_list_get( p_instance, "video filter2" );
+    return module_description_list_get( p_instance, "video filter" );
 }
 
 int64_t libvlc_clock(void)
 {
-    return mdate();
+    return US_FROM_VLC_TICK(vlc_tick_now());
 }
+
+const char vlc_module_name[] = "libvlc";

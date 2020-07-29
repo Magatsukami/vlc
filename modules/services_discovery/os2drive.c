@@ -33,7 +33,7 @@
 
 static int Open (vlc_object_t *);
 
-VLC_SD_PROBE_HELPER("disc", "Discs", SD_CAT_DEVICES)
+VLC_SD_PROBE_HELPER("disc", N_("Discs"), SD_CAT_DEVICES)
 
 /*
  * Module descriptor
@@ -45,7 +45,7 @@ vlc_module_begin ()
     set_category (CAT_PLAYLIST)
     set_subcategory (SUBCAT_PLAYLIST_SD)
     set_capability ("services_discovery", 0)
-    set_callbacks (Open, NULL)
+    set_callback(Open)
     add_shortcut ("disc")
 
     VLC_SD_PROBE_SUBMODULE
@@ -65,6 +65,8 @@ static int Open (vlc_object_t *obj)
     ULONG ulData;
     ULONG ulDataLen;
     ULONG rc;
+
+    sd->description = _("Discs");
 
     if (DosOpen ((PSZ)"CD-ROM2$", (PHFILE)&hcd2, &ulAction, 0, FILE_NORMAL,
                  OPEN_ACTION_OPEN_IF_EXISTS | OPEN_ACTION_FAIL_IF_NEW,
@@ -88,12 +90,12 @@ static int Open (vlc_object_t *obj)
             letter = 'A' + drive;
 
             mrl[8] = name[0] = letter;
-            item = input_item_NewWithType (mrl, name, 0, NULL, 0, -1, ITEM_TYPE_DISC);
+            item = input_item_NewDisc (mrl, name, INPUT_DURATION_INDEFINITE);
             msg_Dbg (sd, "adding %s (%s)", mrl, name);
             if (item == NULL)
                 break;
 
-            services_discovery_AddItem (sd, item, _("Local drives"));
+            services_discovery_AddItem (sd, item);
         }
     }
 

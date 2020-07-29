@@ -2,7 +2,6 @@
  * rawvid.c : raw video input module for vlc
  *****************************************************************************
  * Copyright (C) 2007 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Gildas Bazin <gbazin@videolan.org>
  *          Antoine Cellerier <dionoea at videolan d.t org>
@@ -33,7 +32,6 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_demux.h>
-#include <assert.h>
 
 /*****************************************************************************
  * Module descriptor
@@ -80,7 +78,7 @@ vlc_module_end ()
 /*****************************************************************************
  * Definitions of structures used by this plugin
  *****************************************************************************/
-struct demux_sys_t
+typedef struct
 {
     int    frame_size;
 
@@ -90,7 +88,7 @@ struct demux_sys_t
     date_t pcr;
 
     bool b_y4m;
-};
+} demux_sys_t;
 
 /*****************************************************************************
  * Local prototypes
@@ -129,15 +127,15 @@ static int Open( vlc_object_t * p_this )
     demux_t     *p_demux = (demux_t*)p_this;
     demux_sys_t *p_sys;
     int i_width=-1, i_height=-1;
-    unsigned u_fps_num=0, u_fps_den=1;
+    unsigned u_fps_num, u_fps_den;
     vlc_fourcc_t i_chroma = 0;
-    unsigned int i_sar_num = 0;
-    unsigned int i_sar_den = 0;
+    unsigned int i_sar_num;
+    unsigned int i_sar_den;
     const struct preset_t *p_preset = NULL;
     const uint8_t *p_peek;
     bool b_y4m = false;
 
-    if( stream_Peek( p_demux->s, &p_peek, 9 ) == 9 )
+    if( vlc_stream_Peek( p_demux->s, &p_peek, 9 ) == 9 )
     {
         /* http://wiki.multimedia.cx/index.php?title=YUV4MPEG2 */
         if( !strncmp( (char *)p_peek, "YUV4MPEG2", 9 ) )
@@ -147,13 +145,13 @@ static int Open( vlc_object_t * p_this )
         }
     }
 
-    if( !p_demux->b_force )
+    if( !p_demux->obj.force )
     {
         /* guess preset based on file extension */
-        if( !p_demux->psz_file )
+        if( !p_demux->psz_filepath )
             return VLC_EGENERIC;
 
-        const char *psz_ext = strrchr( p_demux->psz_file, '.' );
+        const char *psz_ext = strrchr( p_demux->psz_filepath, '.' );
         if( !psz_ext )
             return VLC_EGENERIC;
         psz_ext++;
@@ -190,13 +188,14 @@ valid:
     /* override presets if yuv4mpeg2 */
     if( b_y4m )
     {
-        char *psz = stream_ReadLine( p_demux->s );
+        /* The string should start with "YUV4MPEG2" */
+        char *psz = vlc_stream_ReadLine( p_demux->s );
         char *psz_buf;
         int a = 1;
         int b = 1;
 
-        /* The string will start with "YUV4MPEG2" */
-        assert( strlen(psz) >= 9 );
+        if( unlikely(psz == NULL) )
+            goto error;
 
         /* NB, it is not possible to handle interlaced here, since the
          * interlaced picture flags are in picture_t not block_t */
@@ -294,47 +293,15 @@ valid:
         free( psz_tmp );
     }
 
-    psz_tmp = var_CreateGetNonEmptyString( p_demux, "rawvid-fps" );
-    if( psz_tmp )
+    if( var_InheritURational( p_demux, &u_fps_num, &u_fps_den, "rawvid-fps" ) )
     {
-        char *p_ptr;
-        /* fps can either be n/d or q.f
-         * for accuracy, avoid representation in float */
-        u_fps_num = strtol( psz_tmp, &p_ptr, 10 );
-        if( *p_ptr == '/' )
-        {
-            p_ptr++;
-            u_fps_den = strtol( p_ptr, NULL, 10 );
-        }
-        else if( *p_ptr == '.' )
-        {
-            char *p_end;
-            p_ptr++;
-            int i_frac =  strtol( p_ptr, &p_end, 10 );
-            u_fps_den = (p_end - p_ptr) * 10;
-            if( !u_fps_den )
-                u_fps_den = 1;
-            u_fps_num = u_fps_num * u_fps_den + i_frac;
-        }
-        else if( *p_ptr == '\0')
-        {
-            u_fps_den = 1;
-        }
-        free( psz_tmp );
+        u_fps_num = 0;
+        u_fps_den = 1;
     }
 
-    psz_tmp = var_CreateGetNonEmptyString( p_demux, "rawvid-aspect-ratio" );
-    if( psz_tmp )
-    {
-        char *psz_denominator = strchr( psz_tmp, ':' );
-        if( psz_denominator )
-        {
-            *psz_denominator++ = '\0';
-            i_sar_num = atoi( psz_tmp )         * i_height;
-            i_sar_den = atoi( psz_denominator ) * i_width;
-        }
-        free( psz_tmp );
-    }
+    if( var_InheritURational( p_demux, &i_sar_num, &i_sar_den,
+                              "rawvid-aspect-ratio" ) )
+        i_sar_num = i_sar_den = 1;
 
     /* moan about anything wrong */
     if( i_width <= 0 || i_height <= 0 )
@@ -373,7 +340,7 @@ valid:
                  u_fps_num, u_fps_den, 0);
     date_Init( &p_sys->pcr, p_sys->fmt_video.video.i_frame_rate,
                p_sys->fmt_video.video.i_frame_rate_base );
-    date_Set( &p_sys->pcr, 0 );
+    date_Set( &p_sys->pcr, VLC_TICK_0 );
 
     if( !p_sys->fmt_video.video.i_bits_per_pixel )
     {
@@ -381,8 +348,19 @@ valid:
                  (char*)&i_chroma );
         goto error;
     }
-    p_sys->frame_size = i_width * i_height
-                        * p_sys->fmt_video.video.i_bits_per_pixel / 8;
+    const vlc_chroma_description_t *dsc =
+            vlc_fourcc_GetChromaDescription(p_sys->fmt_video.video.i_chroma);
+    if (unlikely(dsc == NULL))
+        goto error;
+    p_sys->frame_size = 0;
+    for (unsigned i=0; i<dsc->plane_count; i++)
+    {
+        unsigned pitch = (i_width + (dsc->p[i].w.den - 1))
+                         * dsc->p[i].w.num / dsc->p[i].w.den * dsc->pixel_size;
+        unsigned lines = (i_height + (dsc->p[i].h.den - 1))
+                         * dsc->p[i].h.num / dsc->p[i].h.den;
+        p_sys->frame_size += pitch * lines;
+    }
     p_sys->p_es_video = es_out_Add( p_demux->out, &p_sys->fmt_video );
 
     p_demux->pf_demux   = Demux;
@@ -390,7 +368,6 @@ valid:
     return VLC_SUCCESS;
 
 error:
-    stream_Seek( p_demux->s, 0 ); // Workaround, but y4m uses stream_ReadLines
     free( p_sys );
     return VLC_EGENERIC;
 }
@@ -414,40 +391,38 @@ static int Demux( demux_t *p_demux )
 {
     demux_sys_t *p_sys  = p_demux->p_sys;
     block_t     *p_block;
-    mtime_t i_pcr = date_Get( &p_sys->pcr );
+    vlc_tick_t i_pcr = date_Get( &p_sys->pcr );
 
     /* Call the pace control */
-    es_out_Control( p_demux->out, ES_OUT_SET_PCR, VLC_TS_0 + i_pcr );
+    es_out_SetPCR( p_demux->out, i_pcr );
 
     if( p_sys->b_y4m )
     {
         /* Skip the frame header */
         /* Skip "FRAME" */
-        if( stream_Read( p_demux->s, NULL, 5 ) < 5 )
-            return 0;
+        if( vlc_stream_Read( p_demux->s, NULL, 5 ) < 5 )
+            return VLC_DEMUXER_EOF;
         /* Find \n */
         for( ;; )
         {
             uint8_t b;
-            if( stream_Read( p_demux->s, &b, 1 ) < 1 )
-                return 0;
+            if( vlc_stream_Read( p_demux->s, &b, 1 ) < 1 )
+                return VLC_DEMUXER_EOF;
             if( b == 0x0a )
                 break;
         }
     }
 
-    if( ( p_block = stream_Block( p_demux->s, p_sys->frame_size ) ) == NULL )
-    {
-        /* EOF */
-        return 0;
-    }
+    p_block = vlc_stream_Block( p_demux->s, p_sys->frame_size );
+    if( p_block == NULL )
+        return VLC_DEMUXER_EOF;
 
-    p_block->i_dts = p_block->i_pts = VLC_TS_0 + i_pcr;
+    p_block->i_dts = p_block->i_pts = i_pcr;
     es_out_Send( p_demux->out, p_sys->p_es_video, p_block );
 
     date_Increment( &p_sys->pcr, 1 );
 
-    return 1;
+    return VLC_DEMUXER_SUCCESS;
 }
 
 /*****************************************************************************

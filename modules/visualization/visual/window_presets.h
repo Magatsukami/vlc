@@ -2,7 +2,6 @@
  * window_presets.h : Variable names and strings of FFT window presets
  *****************************************************************************
  * Copyright (C) 2014 Ronald Wright
- * $Id$
  *
  * Author: Ronald Wright <logiconcepts819@gmail.com>
  *
@@ -21,8 +20,8 @@
  * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
  *****************************************************************************/
 
-#ifndef _WINDOW_PRESETS_
-#define _WINDOW_PRESETS_
+#ifndef VLC_VISUAL_WINDOW_PRESETS_H_
+#define VLC_VISUAL_WINDOW_PRESETS_H_
 
 /* Window functions supported by VLC. These are the typical window types used
  * in spectrum analyzers. */
@@ -34,4 +33,4 @@ static const char * const window_list_text[NB_WINDOWS] = {
     N_("None"), N_("Hann"), N_("Flat Top"), N_("Blackman-Harris"), N_("Kaiser"),
 };
 
-#endif /* _WINDOW_PRESETS_ */
+#endif /* include-guard */

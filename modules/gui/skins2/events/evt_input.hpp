@@ -2,7 +2,6 @@
  * evt_input.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -44,7 +43,7 @@ protected:
     EvtInput( intf_thread_t *pIntf, int mod = kModNone );
 
     /// Add the modifier to the event string
-    void addModifier( string &rEvtString ) const;
+    void addModifier( std::string &rEvtString ) const;
 
 private:
     /// Modifiers (special key(s) pressed during the mouse event)

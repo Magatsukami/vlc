@@ -2,7 +2,6 @@
  * x11_popup.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Olivier Teulière <ipkiss@via.ecp.fr>
  *
@@ -53,7 +52,7 @@ void X11Popup::hide()
 }
 
 
-void X11Popup::addItem( const string &rLabel, int pos )
+void X11Popup::addItem( const std::string &rLabel, int pos )
 {
     // TODO
     (void)rLabel; (void)pos;

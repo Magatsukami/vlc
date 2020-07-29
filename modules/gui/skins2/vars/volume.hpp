@@ -2,7 +2,6 @@
  * volume.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -45,7 +44,7 @@ public:
 
     virtual float getStep() const { return m_step; }
 
-    virtual string getAsStringPercent() const;
+    virtual std::string getAsStringPercent() const;
 
 private:
     // preferred volume step on [0., 1.]

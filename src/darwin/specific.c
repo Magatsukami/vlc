@@ -3,7 +3,6 @@
  * darwin_specific.m: Darwin specific features
  *****************************************************************************
  * Copyright (C) 2001-2009 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Sam Hocevar <sam@zoy.org>
  *          Christophe Massiot <massiot@via.ecp.fr>
@@ -33,9 +32,7 @@
 #include <dirent.h>                                                /* *dir() */
 #include <CoreFoundation/CoreFoundation.h>
 
-#ifdef HAVE_LOCALE_H
-#   include <locale.h>
-#endif
+#include <locale.h>
 
 /*****************************************************************************
  * system_Init: fill in program path & retrieve language

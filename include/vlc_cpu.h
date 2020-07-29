@@ -26,7 +26,18 @@
 #ifndef VLC_CPU_H
 # define VLC_CPU_H 1
 
+/**
+ * Retrieves CPU capability flags.
+ */
 VLC_API unsigned vlc_CPU(void);
+
+/**
+ * Computes CPU capability flags.
+ *
+ * Do not call this function directly.
+ * Call vlc_CPU() instead, which caches the correct value.
+ */
+unsigned vlc_CPU_raw(void);
 
 # if defined (__i386__) || defined (__x86_64__)
 #  define HAVE_FPU 1
@@ -50,11 +61,7 @@ VLC_API unsigned vlc_CPU(void);
 #  define VLC_MMX
 # else
 #  define vlc_CPU_MMX() ((vlc_CPU() & VLC_CPU_MMX) != 0)
-#  if VLC_GCC_VERSION(4, 4) || defined(__clang__)
-#   define VLC_MMX __attribute__ ((__target__ ("mmx")))
-#  else
-#   define VLC_MMX VLC_MMX_is_not_implemented_on_this_compiler
-#  endif
+#  define VLC_MMX __attribute__ ((__target__ ("mmx")))
 # endif
 
 # if defined (__SSE__)
@@ -64,11 +71,7 @@ VLC_API unsigned vlc_CPU(void);
 # else
 #  define vlc_CPU_MMXEXT() ((vlc_CPU() & VLC_CPU_MMXEXT) != 0)
 #  define vlc_CPU_SSE() ((vlc_CPU() & VLC_CPU_SSE) != 0)
-#  if VLC_GCC_VERSION(4, 4) || defined(__clang__)
-#   define VLC_SSE __attribute__ ((__target__ ("sse")))
-#  else
-#   define VLC_SSE VLC_SSE_is_not_implemented_on_this_compiler
-#  endif
+#  define VLC_SSE __attribute__ ((__target__ ("sse")))
 # endif
 
 # ifdef __SSE2__
@@ -178,6 +181,20 @@ VLC_API unsigned vlc_CPU(void);
 
 # elif defined (__aarch64__)
 #  define HAVE_FPU 1
+#  define VLC_CPU_ARM_NEON 0x1
+#  define VLC_CPU_ARM_SVE  0x2
+
+#  ifdef __ARM_NEON
+#   define vlc_CPU_ARM_NEON() (1)
+#  else
+#   define vlc_CPU_ARM_NEON() ((vlc_CPU() & VLC_CPU_ARM_NEON) != 0)
+#  endif
+
+#  ifdef __ARM_FEATURE_SVE
+#   define vlc_CPU_ARM_SVE()   (1)
+#  else
+#   define vlc_CPU_ARM_SVE()   ((vlc_CPU() & VLC_CPU_ARM_SVE) != 0)
+#  endif
 
 # elif defined (__sparc__)
 #  define HAVE_FPU 1

@@ -3,7 +3,6 @@
  *****************************************************************************
  * Copyright (C) 2005-2009 VLC authors and VideoLAN
  * Copyright (C) 2013      Vianney Boyer
- * $Id$
  *
  * Authors: Vianney Boyer <vlcvboyer -at- gmail -dot- com>
  *
@@ -50,6 +49,8 @@
  * Local prototypes
  *****************************************************************************/
 
+typedef struct filter_sys_t filter_sys_t;
+
 typedef struct {
     int32_t i_preview_width, i_preview_lines;
     int32_t i_border_width, i_border_lines;
@@ -67,7 +68,7 @@ typedef struct {
     int32_t i_original_row, i_original_col;
     int32_t i_top_shape, i_btm_shape, i_right_shape, i_left_shape;
     float f_pos_x, f_pos_y;
-    int8_t i_actual_angle;                   /* 0 = 0°, 1 = 90°... rotation center = top-left corner */
+    int8_t i_actual_angle;                   /* 0 = 0Â°, 1 = 90Â°... rotation center = top-left corner */
     int32_t i_actual_mirror;                 /* +1 = without mirror ; -1 = with mirror               */
 } save_piece_t;
 

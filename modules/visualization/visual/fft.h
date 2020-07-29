@@ -1,7 +1,6 @@
 /*****************************************************************************
  * fft.h: Headers for iterative implementation of a FFT
  *****************************************************************************
- * $Id$
  *
  * Mainly taken from XMMS's code
  *
@@ -22,8 +21,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
  *****************************************************************************/
 
-#ifndef _FFT_H_
-#define _FFT_H_
+#ifndef VLC_VISUAL_FFT_H_
+#define VLC_VISUAL_FFT_H_
 
 #define FFT_BUFFER_SIZE_LOG 9
 
@@ -53,4 +52,4 @@ void fft_perform (const sound_sample *input, float *output, fft_state *state);
 void fft_close (fft_state *state);
 
 
-#endif /* _FFT_H_ */
+#endif /* include-guard */

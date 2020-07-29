@@ -2,7 +2,6 @@
  * var_tree.hpp
  *****************************************************************************
  * Copyright (C) 2005 the VideoLAN team
- * $Id$
  *
  * Authors: Antoine Cellerier <dionoea@videolan.org>
  *          Clément Stenac <zorglub@videolan.org>
@@ -33,6 +32,8 @@
 #include "ustring.hpp"
 #include "var_percent.hpp"
 
+#include <vlc_input_item.h>
+
 class VarTree;
 struct tree_update;
 
@@ -44,7 +45,7 @@ class VarTree: public Variable,
 public:
     VarTree( intf_thread_t *pIntf );
 
-    VarTree( intf_thread_t *pIntf, VarTree *pParent, int id,
+    VarTree( intf_thread_t *pIntf, VarTree *pParent, input_item_t *media,
              const UStringPtr &rcString, bool selected, bool playing,
              bool expanded, bool readonly );
     VarTree( const VarTree& );
@@ -52,15 +53,16 @@ public:
     virtual ~VarTree();
 
     /// Iterators
-    typedef list<VarTree>::iterator Iterator;
-    typedef list<VarTree>::const_iterator ConstIterator;
+    typedef std::list<VarTree>::iterator Iterator;
+    typedef std::list<VarTree>::const_iterator ConstIterator;
 
     /// Get the variable type
-    virtual const string &getType() const { return m_type; }
+    virtual const std::string &getType() const { return m_type; }
 
     /// Add a pointer on string in the children's list
-    virtual Iterator add( int id, const UStringPtr &rcString, bool selected,
-                    bool playing, bool expanded, bool readonly, int pos = -1 );
+    virtual Iterator add( input_item_t * media, const UStringPtr &rcString,
+                          bool selected, bool playing,
+                          bool expanded, bool readonly, int pos = -1 );
 
     /// Remove the selected item from the children's list
     virtual void delSelected();
@@ -68,7 +70,7 @@ public:
     /// Remove all elements from the children's list
     virtual void clear();
 
-    inline int  getId() { return m_id; }
+    input_item_t* getMedia() { return m_media; }
     inline UString* getString() {return (UString*)m_cString.get(); }
     inline void setString( UStringPtr val ) { m_cString = val; }
 
@@ -82,6 +84,7 @@ public:
     inline void setPlaying( bool val ) { m_playing = val; }
     inline void setExpanded( bool val ) { m_expanded = val; }
     inline void setFlat( bool val ) { m_flat = val; }
+    void setMedia( input_item_t* media );
 
     inline void toggleSelected() { m_selected = !m_selected; }
     inline void toggleExpanded() { setExpanded( !m_expanded ); }
@@ -257,7 +260,7 @@ public:
 protected:
 
     /// List of children
-    list<VarTree> m_children;
+    std::list<VarTree> m_children;
 
 private:
 
@@ -273,7 +276,7 @@ private:
     /// Pointer to parent node
     VarTree *m_pParent;
 
-    int m_id;
+    input_item_t* m_media;
     UStringPtr m_cString;
 
     /// indicators
@@ -285,7 +288,7 @@ private:
     bool m_dontMove;
 
     /// Variable type
-    static const string m_type;
+    static const std::string m_type;
 
     /// Position variable
     VariablePtr m_cPosition;
@@ -309,5 +312,7 @@ typedef struct tree_update
     tree_update( enum type_t t, VarTree::IteratorVisible item ) :
         type( t ), it( item ) {}
 } tree_update;
+
+
 
 #endif

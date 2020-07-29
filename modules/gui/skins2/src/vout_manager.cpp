@@ -2,7 +2,6 @@
  * vout_manager.cpp
  *****************************************************************************
  * Copyright (C) 2009 the VideoLAN team
- * $Id$
  *
  * Authors: Erwan Tulou <brezhoneg1 at yahoo.fr>
  *
@@ -92,7 +91,7 @@ void VoutManager::saveVoutConfig( )
 {
     // Save width/height to be consistent across themes
     // and detach Video Controls
-    vector<SavedWnd>::iterator it;
+    std::vector<SavedWnd>::iterator it;
     for( it = m_SavedWndVec.begin(); it != m_SavedWndVec.end(); ++it )
     {
         if( it->pCtrlVideo )
@@ -122,7 +121,7 @@ void VoutManager::restoreVoutConfig( bool b_success )
     }
 
     // reattach vout(s) to Video Controls
-    vector<SavedWnd>::iterator it;
+    std::vector<SavedWnd>::iterator it;
     for( it = m_SavedWndVec.begin(); it != m_SavedWndVec.end(); ++it )
     {
         CtrlVideo* pCtrlVideo = getBestCtrlVideo();
@@ -137,7 +136,7 @@ void VoutManager::restoreVoutConfig( bool b_success )
 
 void VoutManager::discardVout( CtrlVideo* pCtrlVideo )
 {
-    vector<SavedWnd>::iterator it;
+    std::vector<SavedWnd>::iterator it;
     for( it = m_SavedWndVec.begin(); it != m_SavedWndVec.end(); ++it )
     {
         if( it->pCtrlVideo == pCtrlVideo )
@@ -155,7 +154,7 @@ void VoutManager::discardVout( CtrlVideo* pCtrlVideo )
 
 void VoutManager::requestVout( CtrlVideo* pCtrlVideo )
 {
-    vector<SavedWnd>::iterator it;
+    std::vector<SavedWnd>::iterator it;
     for( it = m_SavedWndVec.begin(); it != m_SavedWndVec.end(); ++it )
     {
         if( it->pCtrlVideo == NULL )
@@ -171,21 +170,12 @@ void VoutManager::requestVout( CtrlVideo* pCtrlVideo )
 
 CtrlVideo* VoutManager::getBestCtrlVideo( )
 {
-    vector<CtrlVideo*>::const_iterator it;
+    std::vector<CtrlVideo*>::const_iterator it;
 
     // first, look up a video control that is visible and unused
     for( it = m_pCtrlVideoVec.begin(); it != m_pCtrlVideoVec.end(); ++it )
     {
         if( (*it)->isUseable() && !(*it)->isUsed() )
-        {
-            return (*it);
-        }
-    }
-
-    // as a fallback, look up any video control that is unused
-    for( it = m_pCtrlVideoVec.begin(); it != m_pCtrlVideoVec.end(); ++it )
-    {
-        if( !(*it)->isUsed() )
         {
             return (*it);
         }
@@ -222,20 +212,20 @@ void VoutManager::acceptWnd( vout_window_t* pWnd, int width, int height )
     m_SavedWndVec.push_back( SavedWnd( pWnd, pVoutWindow, pCtrlVideo ) );
 
     msg_Dbg( pWnd, "New vout : Ctrl = %p, w x h = %ix%i",
-                    pCtrlVideo, width, height );
+                    (void *)pCtrlVideo, width, height );
 }
 
 
 void VoutManager::releaseWnd( vout_window_t* pWnd )
 {
     // remove vout thread from savedVec
-    vector<SavedWnd>::iterator it;
+    std::vector<SavedWnd>::iterator it;
     for( it = m_SavedWndVec.begin(); it != m_SavedWndVec.end(); ++it )
     {
         if( it->pWnd == pWnd )
         {
             msg_Dbg( getIntf(), "vout released vout=%p, VideoCtrl=%p",
-                             pWnd, it->pCtrlVideo );
+                             (void *)pWnd, it->pCtrlVideo );
 
             // if a video control was being used, detach from it
             if( it->pCtrlVideo )
@@ -260,7 +250,7 @@ void VoutManager::setSizeWnd( vout_window_t *pWnd, int width, int height )
    msg_Dbg( pWnd, "setSize (%ix%i) received from vout thread",
                   width, height );
 
-   vector<SavedWnd>::iterator it;
+   std::vector<SavedWnd>::iterator it;
    for( it = m_SavedWndVec.begin(); it != m_SavedWndVec.end(); ++it )
    {
        if( it->pWnd == pWnd )
@@ -289,7 +279,7 @@ void VoutManager::setFullscreenWnd( vout_window_t *pWnd, bool b_fullscreen )
     // reconfigure the fullscreen window (multiple screens)
     if( b_fullscreen )
     {
-        vector<SavedWnd>::iterator it;
+        std::vector<SavedWnd>::iterator it;
         for( it = m_SavedWndVec.begin(); it != m_SavedWndVec.end(); ++it )
         {
             if( it->pWnd == pWnd )
@@ -303,6 +293,17 @@ void VoutManager::setFullscreenWnd( vout_window_t *pWnd, bool b_fullscreen )
 
     // set fullscreen
     VlcProc::instance( getIntf() )->setFullscreenVar( b_fullscreen );
+}
+
+
+void VoutManager::hideMouseWnd( vout_window_t *pWnd, bool hide )
+{
+    msg_Dbg( pWnd, "hide mouse (%i) received from vout thread", hide );
+    OSFactory *pOsFactory = OSFactory::instance( getIntf() );
+    if( hide )
+        pOsFactory->changeCursor( OSFactory::kNoCursor );
+    else
+        pOsFactory->changeCursor( OSFactory::kDefaultArrow );
 }
 
 
@@ -323,8 +324,6 @@ void VoutManager::onUpdate( Subject<VarBool> &rVariable, void *arg )
 void VoutManager::configureFullscreen( VoutWindow& rWindow )
 {
     int numScr = var_InheritInteger( getIntf(), "qt-fullscreen-screennumber" );
-    int x0 = m_pVoutMainWindow->getTop();
-    int y0 = m_pVoutMainWindow->getLeft();
 
     int x, y, w, h;
     if( numScr >= 0 )
@@ -339,16 +338,17 @@ void VoutManager::configureFullscreen( VoutWindow& rWindow )
         rWindow.getMonitorInfo( &x, &y, &w, &h );
     }
 
-    if( x != x0 || y != y0 )
-    {
-        // move and resize fullscreen
-        m_pVoutMainWindow->move( x, y );
-        m_pVoutMainWindow->resize( w, h );
+    // move and resize fullscreen
+    m_pVoutMainWindow->move( x, y );
+    m_pVoutMainWindow->resize( w, h );
 
-        // ensure the fs controller is also moved
-        if( m_pFscWindow )
-        {
-            m_pFscWindow->moveTo( x, y, w, h );
-        }
+    // ensure the fs controller is also moved
+    if( m_pFscWindow )
+    {
+        m_pFscWindow->moveTo( x, y, w, h );
     }
+
+    // place voutWindow within fullscreen
+    rWindow.move( x, y );
+    rWindow.resize( w, h );
 }

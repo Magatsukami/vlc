@@ -2,7 +2,7 @@
  * vmem.c: memory video driver for vlc
  *****************************************************************************
  * Copyright (C) 2008 VLC authors and VideoLAN
- * Copyrgiht (C) 2010 Rémi Denis-Courmont
+ * Copyright (C) 2010 Rémi Denis-Courmont
  *
  * Authors: Sam Hocevar <sam@zoy.org>
  *
@@ -34,7 +34,6 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_vout_display.h>
-#include <vlc_picture_pool.h>
 
 /*****************************************************************************
  * Module descriptor
@@ -52,8 +51,9 @@
 #define LT_CHROMA N_("Output chroma for the memory image as a 4-character " \
                       "string, eg. \"RV32\".")
 
-static int  Open (vlc_object_t *);
-static void Close(vlc_object_t *);
+static int Open(vout_display_t *vd, const vout_display_cfg_t *cfg,
+                video_format_t *fmtp, vlc_video_context *context);
+static void Close(vout_display_t *vd);
 
 vlc_module_begin()
     set_description(N_("Video memory output"))
@@ -61,7 +61,6 @@ vlc_module_begin()
 
     set_category(CAT_VIDEO)
     set_subcategory(SUBCAT_VIDEO_VOUT)
-    set_capability("vout display", 0)
 
     add_integer("vmem-width", 320, T_WIDTH, LT_WIDTH, false)
         change_private()
@@ -75,23 +74,21 @@ vlc_module_begin()
     add_obsolete_string("vmem-unlock") /* obsoleted since 1.1.1 */
     add_obsolete_string("vmem-data") /* obsoleted since 1.1.1 */
 
-    set_callbacks(Open, Close)
+    set_callback_display(Open, 0)
 vlc_module_end()
 
 /*****************************************************************************
  * Local prototypes
  *****************************************************************************/
-struct picture_sys_t {
-    vout_display_sys_t *sys;
+typedef struct
+{
     void *id;
-};
+} picture_sys_t;
 
 /* NOTE: the callback prototypes must match those of LibVLC */
 struct vout_display_sys_t {
-    picture_pool_t *pool;
-    unsigned        count;
-
     void *opaque;
+    void *pic_opaque;
     void *(*lock)(void *sys, void **plane);
     void (*unlock)(void *sys, void *id, void *const *plane);
     void (*display)(void *sys, void *id);
@@ -104,21 +101,18 @@ struct vout_display_sys_t {
 typedef unsigned (*vlc_format_cb)(void **, char *, unsigned *, unsigned *,
                                   unsigned *, unsigned *);
 
-static picture_pool_t *Pool  (vout_display_t *, unsigned);
-static void           Display(vout_display_t *, picture_t *, subpicture_t *);
+static void           Prepare(vout_display_t *, picture_t *, subpicture_t *, vlc_tick_t);
+static void           Display(vout_display_t *, picture_t *);
 static int            Control(vout_display_t *, int, va_list);
-
-static int            Lock(picture_t *);
-static void           Unlock(picture_t *);
 
 /*****************************************************************************
  * Open: allocates video thread
  *****************************************************************************
  * This function allocates and initializes a vout method.
  *****************************************************************************/
-static int Open(vlc_object_t *object)
+static int Open(vout_display_t *vd, const vout_display_cfg_t *cfg,
+                video_format_t *fmtp, vlc_video_context *context)
 {
-    vout_display_t *vd = (vout_display_t *)object;
     vout_display_sys_t *sys = malloc(sizeof(*sys));
     if (unlikely(!sys))
         return VLC_ENOMEM;
@@ -136,10 +130,10 @@ static int Open(vlc_object_t *object)
     sys->display = var_InheritAddress(vd, "vmem-display");
     sys->cleanup = var_InheritAddress(vd, "vmem-cleanup");
     sys->opaque = var_InheritAddress(vd, "vmem-data");
-    sys->pool = NULL;
 
     /* Define the video format */
-    video_format_t fmt = vd->fmt;
+    video_format_t fmt;
+    video_format_ApplyRotation(&fmt, fmtp);
 
     if (setup != NULL) {
         char chroma[5];
@@ -149,14 +143,22 @@ static int Open(vlc_object_t *object)
         memset(sys->pitches, 0, sizeof(sys->pitches));
         memset(sys->lines, 0, sizeof(sys->lines));
 
-        sys->count = setup(&sys->opaque, chroma, &fmt.i_width, &fmt.i_height,
-                           sys->pitches, sys->lines);
-        if (sys->count == 0) {
+        unsigned widths[2], heights[2];
+        widths[0] = fmt.i_width;
+        widths[1] = fmt.i_visible_width;
+
+        heights[0] = fmt.i_height;
+        heights[1] = fmt.i_visible_height;
+
+        if (setup(&sys->opaque, chroma, widths, heights,
+                           sys->pitches, sys->lines) == 0) {
             msg_Err(vd, "video format setup failure (no pictures)");
             free(sys);
             return VLC_EGENERIC;
         }
         fmt.i_chroma = vlc_fourcc_GetCodecFromString(VIDEO_ES, chroma);
+        fmt.i_width = widths[0];
+        fmt.i_height = heights[0];
 
     } else {
         char *chroma = var_InheritString(vd, "vmem-chroma");
@@ -172,7 +174,6 @@ static int Open(vlc_object_t *object)
             sys->pitches[i] = sys->pitches[0];
             sys->lines[i] = sys->lines[0];
         }
-        sys->count = 1;
         sys->cleanup = NULL;
     }
     fmt.i_x_offset = fmt.i_y_offset = 0;
@@ -212,146 +213,75 @@ static int Open(vlc_object_t *object)
     }
 
     /* */
-    vout_display_info_t info = vd->info;
-    info.has_hide_mouse = true;
+    *fmtp = fmt;
 
-    /* */
     vd->sys     = sys;
-    vd->fmt     = fmt;
-    vd->info    = info;
-    vd->pool    = Pool;
-    vd->prepare = NULL;
+    vd->prepare = Prepare;
     vd->display = Display;
     vd->control = Control;
-    vd->manage  = NULL;
+    vd->close   = Close;
 
-    /* */
-    vout_display_SendEventFullscreen(vd, false);
-    vout_display_SendEventDisplaySize(vd, fmt.i_width, fmt.i_height, false);
+    (void) cfg; (void) context;
     return VLC_SUCCESS;
 }
 
-static void Close(vlc_object_t *object)
+static void Close(vout_display_t *vd)
 {
-    vout_display_t *vd = (vout_display_t *)object;
     vout_display_sys_t *sys = vd->sys;
 
     if (sys->cleanup)
         sys->cleanup(sys->opaque);
-    picture_pool_Delete(sys->pool);
     free(sys);
 }
 
-/* */
-static picture_pool_t *Pool(vout_display_t *vd, unsigned count)
+static void Prepare(vout_display_t *vd, picture_t *pic, subpicture_t *subpic,
+                    vlc_tick_t date)
 {
+    VLC_UNUSED(date);
     vout_display_sys_t *sys = vd->sys;
+    picture_resource_t rsc = { .p_sys = NULL };
+    void *planes[PICTURE_PLANE_MAX];
 
-    if (sys->pool)
-        return sys->pool;
+    sys->pic_opaque = sys->lock(sys->opaque, planes);
 
-    if (count > sys->count)
-        count = sys->count;
-
-    picture_t *pictures[count];
-
-    for (unsigned i = 0; i < count; i++) {
-        picture_sys_t *picsys = malloc(sizeof (*picsys));
-        if (unlikely(picsys == NULL))
-        {
-            count = i;
-            break;
-        }
-        picsys->sys = sys;
-        picsys->id = NULL;
-
-        picture_resource_t rsc = { .p_sys = picsys };
-
-        for (unsigned i = 0; i < PICTURE_PLANE_MAX; i++) {
-            /* vmem-lock is responsible for the allocation */
-            rsc.p[i].p_pixels = NULL;
-            rsc.p[i].i_lines  = sys->lines[i];
-            rsc.p[i].i_pitch  = sys->pitches[i];
-        }
-
-        pictures[i] = picture_NewFromResource(&vd->fmt, &rsc);
-        if (!pictures[i]) {
-            free(rsc.p_sys);
-            count = i;
-            break;
-        }
+    for (unsigned i = 0; i < PICTURE_PLANE_MAX; i++) {
+        rsc.p[i].p_pixels = planes[i];
+        rsc.p[i].i_lines  = sys->lines[i];
+        rsc.p[i].i_pitch  = sys->pitches[i];
     }
 
-    /* */
-    picture_pool_configuration_t pool;
-    memset(&pool, 0, sizeof(pool));
-    pool.picture_count = count;
-    pool.picture       = pictures;
-    pool.lock          = Lock;
-    pool.unlock        = Unlock;
-    sys->pool = picture_pool_NewExtended(&pool);
-    if (!sys->pool) {
-        for (unsigned i = 0; i < count; i++)
-            picture_Release(pictures[i]);
+    picture_t *locked = picture_NewFromResource(&vd->fmt, &rsc);
+    if (likely(locked != NULL)) {
+        picture_CopyPixels(locked, pic);
+        picture_Release(locked);
     }
 
-    return sys->pool;
+    if (sys->unlock != NULL)
+        sys->unlock(sys->opaque, sys->pic_opaque, planes);
+
+    (void) subpic;
 }
 
-static void Display(vout_display_t *vd, picture_t *picture, subpicture_t *subpicture)
+static void Display(vout_display_t *vd, picture_t *pic)
 {
     vout_display_sys_t *sys = vd->sys;
+    VLC_UNUSED(pic);
 
-    assert(!picture_IsReferenced(picture));
     if (sys->display != NULL)
-        sys->display(sys->opaque, picture->p_sys->id);
-    picture_Release(picture);
-    VLC_UNUSED(subpicture);
+        sys->display(sys->opaque, sys->pic_opaque);
 }
 
 static int Control(vout_display_t *vd, int query, va_list args)
 {
+    (void) vd; (void) args;
+
     switch (query) {
-    case VOUT_DISPLAY_CHANGE_FULLSCREEN:
-    case VOUT_DISPLAY_CHANGE_DISPLAY_SIZE: {
-        const vout_display_cfg_t *cfg = va_arg(args, const vout_display_cfg_t *);
-        if (cfg->display.width  != vd->fmt.i_width ||
-            cfg->display.height != vd->fmt.i_height)
-            return VLC_EGENERIC;
-        if (cfg->is_fullscreen)
-            return VLC_EGENERIC;
-        return VLC_SUCCESS;
+        case VOUT_DISPLAY_CHANGE_DISPLAY_SIZE:
+        case VOUT_DISPLAY_CHANGE_DISPLAY_FILLED:
+        case VOUT_DISPLAY_CHANGE_ZOOM:
+        case VOUT_DISPLAY_CHANGE_SOURCE_ASPECT:
+        case VOUT_DISPLAY_CHANGE_SOURCE_CROP:
+            return VLC_SUCCESS;
     }
-    default:
-        return VLC_EGENERIC;
-    }
-}
-
-/* */
-static int Lock(picture_t *picture)
-{
-    picture_sys_t *picsys = picture->p_sys;
-    vout_display_sys_t *sys = picsys->sys;
-    void *planes[PICTURE_PLANE_MAX];
-
-    picsys->id = sys->lock(sys->opaque, planes);
-
-    for (int i = 0; i < picture->i_planes; i++)
-        picture->p[i].p_pixels = planes[i];
-
-    return VLC_SUCCESS;
-}
-
-static void Unlock(picture_t *picture)
-{
-    picture_sys_t *picsys = picture->p_sys;
-    vout_display_sys_t *sys = picsys->sys;
-
-    void *planes[PICTURE_PLANE_MAX];
-
-    for (int i = 0; i < picture->i_planes; i++)
-        planes[i] = picture->p[i].p_pixels;
-
-    if (sys->unlock != NULL)
-        sys->unlock(sys->opaque, picsys->id, planes);
+    return VLC_EGENERIC;
 }

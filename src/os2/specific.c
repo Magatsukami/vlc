@@ -25,6 +25,7 @@
 #include <vlc_common.h>
 #include "../libvlc.h"
 #include <vlc_playlist.h>
+#include <vlc_interface.h>
 #include <vlc_url.h>
 
 #include <fcntl.h>
@@ -42,9 +43,27 @@ static HPIPE hpipeIPC     = NULLHANDLE;
 static int   tidIPCFirst  = -1;
 static int   tidIPCHelper = -1;
 
+static void add_to_playlist(vlc_playlist_t *playlist, const char *uri,
+                            bool play_now, int options_count,
+                            const char *const *options)
+{
+    input_item_t *media = input_item_New(uri, NULL);
+    if (!media)
+        return;
+    input_item_AddOptions(media, options_count, options,
+                          VLC_INPUT_OPTION_TRUSTED);
+
+    vlc_playlist_Lock(playlist);
+    vlc_playlist_AppendOne(playlist, media);
+    if (play_now)
+        vlc_playlist_Start(playlist);
+    vlc_playlist_Unlock(playlist);
+    input_item_Release(media);
+}
+
 static void IPCHelperThread( void *arg )
 {
-    vlc_object_t *p_this = arg;
+    libvlc_int_t *libvlc = arg;
 
     ULONG  ulCmd;
     int    i_argc;
@@ -54,7 +73,7 @@ static void IPCHelperThread( void *arg )
     int    i_options;
 
     /* Add files to the playlist */
-    playlist_t *p_playlist = pl_Get( p_this );
+    vlc_playlist_t *p_playlist;
 
     do
     {
@@ -68,7 +87,7 @@ static void IPCHelperThread( void *arg )
         /* Read a count of arguments */
         DosRead( hpipeIPC, &i_argc, sizeof( i_argc ), &cbActual );
 
-        ppsz_argv = malloc( i_argc * sizeof( *ppsz_argv ));
+        ppsz_argv = vlc_alloc( i_argc, sizeof( *ppsz_argv ));
 
         for( int i_opt = 0; i_opt < i_argc; i_opt++ )
         {
@@ -81,6 +100,8 @@ static void IPCHelperThread( void *arg )
             DosRead( hpipeIPC, ppsz_argv[ i_opt ], i_len, &cbActual );
         }
 
+        p_playlist = libvlc_priv(libvlc)->main_playlist;
+
         for( int i_opt = 0; i_opt < i_argc;)
         {
             i_options = 0;
@@ -90,16 +111,16 @@ static void IPCHelperThread( void *arg )
                    *ppsz_argv[ i_opt + i_options + 1 ] == ':' )
                 i_options++;
 
-            playlist_AddExt( p_playlist, ppsz_argv[ i_opt ], NULL,
-                             PLAYLIST_APPEND |
-                             (( i_opt || ulCmd == IPC_CMD_ENQUEUE ) ?
-                                    0 : PLAYLIST_GO ),
-                             PLAYLIST_END, -1, i_options,
-                             ( char const ** )
-                                 ( i_options ? &ppsz_argv[ i_opt + 1 ] :
-                                               NULL ),
-                             VLC_INPUT_OPTION_TRUSTED,
-                             true, pl_Unlocked );
+
+            if( p_playlist )
+            {
+                add_to_playlist( p_playlist, ppsz_argv[ i_opt ],
+                                 i_opt == 0 && ulCmd != IPC_CMD_ENQUEUE,
+                                 i_options,
+                                 ( char const ** )
+                                     ( i_options ? &ppsz_argv[ i_opt + 1 ] :
+                                                   NULL ));
+            }
 
             for( ; i_options >= 0; i_options-- )
                 free( ppsz_argv[ i_opt++ ]);
@@ -107,8 +128,6 @@ static void IPCHelperThread( void *arg )
 
         free( ppsz_argv );
     } while( !DosDisConnectNPipe( hpipeIPC ) && ulCmd != IPC_CMD_QUIT );
-
-    vlc_object_release( p_this );
 
     DosClose( hpipeIPC );
     hpipeIPC = NULLHANDLE;
@@ -180,21 +199,17 @@ void system_Configure( libvlc_int_t *p_this, int i_argc, const char *const ppsz_
             }
 
             /* We are the 1st instance. */
-            vlc_object_t* p_helper = vlc_custom_create( p_this,
-                                                        sizeof( *p_helper ),
-                                                        "ipc helper" );
 
             /* Save the tid of the first instance */
             tidIPCFirst = _gettid();
 
             /* Run the helper thread */
             tidIPCHelper = _beginthread( IPCHelperThread, NULL, 1024 * 1024,
-                                         p_helper );
+                                         p_this );
             if( tidIPCHelper == -1 )
             {
                 msg_Err( p_this, "one instance mode DISABLED "
                          "(IPC helper thread couldn't be created)");
-                vlc_object_release( p_helper );
 
                 tidIPCFirst = -1;
             }

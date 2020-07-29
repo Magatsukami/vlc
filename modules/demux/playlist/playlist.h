@@ -2,7 +2,6 @@
  * playlist.h:  Playlist import module common functions
  *****************************************************************************
  * Copyright (C) 2004 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Sigmund Augdal Helberg <dnumgis@videolan.org>
  *
@@ -22,25 +21,14 @@
  *****************************************************************************/
 
 #include <vlc_input.h>
-#include <vlc_playlist.h>
 
-int Control(demux_t *, int, va_list);
 char *ProcessMRL( const char *, const char * );
-char *FindPrefix( demux_t * );
-
-int Import_Old ( vlc_object_t * );
-
-int Import_Native ( vlc_object_t * );
-void Close_Native ( vlc_object_t * );
 
 int Import_M3U ( vlc_object_t * );
-void Close_M3U ( vlc_object_t * );
 
 int Import_RAM ( vlc_object_t * );
-void Close_RAM ( vlc_object_t * );
 
 int Import_PLS ( vlc_object_t * );
-void Close_PLS ( vlc_object_t * );
 
 int Import_B4S ( vlc_object_t * );
 
@@ -54,64 +42,30 @@ void Close_xspf ( vlc_object_t * );
 int Import_Shoutcast ( vlc_object_t * );
 
 int Import_ASX ( vlc_object_t * );
-void Close_ASX ( vlc_object_t * );
 
 int Import_SGIMB ( vlc_object_t * );
 void Close_SGIMB ( vlc_object_t * );
 
 int Import_QTL ( vlc_object_t * );
 
-int Import_GVP ( vlc_object_t * );
-void Close_GVP ( vlc_object_t * );
-
 int Import_IFO ( vlc_object_t * );
 void Close_IFO ( vlc_object_t * );
 
-int Import_VideoPortal ( vlc_object_t * );
-void Close_VideoPortal ( vlc_object_t * );
+int Import_BDMV ( vlc_object_t * );
+void Close_BDMV ( vlc_object_t * );
 
 int Import_iTML ( vlc_object_t * );
-void Close_iTML ( vlc_object_t * );
+
+int Import_WMS(vlc_object_t *);
 
 int Import_WPL ( vlc_object_t * );
 void Close_WPL ( vlc_object_t * );
 
-int Import_ZPL ( vlc_object_t * );
-void Close_ZPL ( vlc_object_t * );
+#define GetCurrentItem(obj) ((obj)->p_input_item)
+#define GetSource(obj) ((obj)->s)
 
-extern input_item_t * GetCurrentItem(demux_t *p_demux);
-
-bool CheckContentType( stream_t * p_stream, const char * psz_ctype );
-
-#define STANDARD_DEMUX_INIT_MSG( msg ) do { \
-    DEMUX_INIT_COMMON();                    \
-    msg_Dbg( p_demux, "%s", msg ); } while(0)
-
-#define DEMUX_BY_EXTENSION_MSG( ext, msg ) \
-    demux_t *p_demux = (demux_t *)p_this; \
-    if( !demux_IsPathExtension( p_demux, ext ) ) \
+#define CHECK_FILE(obj) \
+do { \
+    if( GetSource(obj)->pf_readdir != NULL ) \
         return VLC_EGENERIC; \
-    STANDARD_DEMUX_INIT_MSG( msg );
-
-#define DEMUX_BY_EXTENSION_OR_FORCED_MSG( ext, module, msg ) \
-    demux_t *p_demux = (demux_t *)p_this; \
-    if( !demux_IsPathExtension( p_demux, ext ) && !demux_IsForced( p_demux, module ) ) \
-        return VLC_EGENERIC; \
-    STANDARD_DEMUX_INIT_MSG( msg );
-
-#define DEMUX_BY_EXTENSION_OR_MIMETYPE( ext, mime, msg ) \
-    demux_t *p_demux = (demux_t *)p_this; \
-    char* demux_mimetype = stream_ContentType( p_demux->s ); \
-    if(!( demux_IsPathExtension( p_demux, ext ) || (demux_mimetype && !strcasecmp( mime, demux_mimetype )) )) { \
-        free( demux_mimetype ); \
-        return VLC_EGENERIC; \
-    } \
-    free( demux_mimetype ); \
-    STANDARD_DEMUX_INIT_MSG( msg );
-
-#define CHECK_PEEK( zepeek, size ) do { \
-    if( stream_Peek( p_demux->s , &zepeek, size ) < size ){ \
-        msg_Dbg( p_demux, "not enough data" ); return VLC_EGENERIC; } } while(0)
-
-#define POKE( peek, stuff, size ) (strncasecmp( (const char *)peek, stuff, size )==0)
-
+} while(0)

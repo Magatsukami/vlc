@@ -2,7 +2,6 @@
  * evt_leave.hpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -34,7 +33,7 @@ class EvtLeave: public EvtInput
 public:
     EvtLeave( intf_thread_t *pIntf ): EvtInput( pIntf ) { }
     virtual ~EvtLeave() { }
-    virtual const string getAsString() const { return "leave"; }
+    virtual const std::string getAsString() const { return "leave"; }
 };
 
 

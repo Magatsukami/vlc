@@ -2,23 +2,22 @@
  * duplicate.c: duplicate stream output module
  *****************************************************************************
  * Copyright (C) 2003-2004 the VideoLAN team
- * $Id$
  *
  * Author: Laurent Aimar <fenrir@via.ecp.fr>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation; either version 2.1 of the License, or
  * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Lesser General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program; if not, write to the Free Software Foundation,
+ * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
  *****************************************************************************/
 
 /*****************************************************************************
@@ -42,7 +41,7 @@ static void     Close   ( vlc_object_t * );
 
 vlc_module_begin ()
     set_description( N_("Duplicate stream output") )
-    set_capability( "sout stream", 50 )
+    set_capability( "sout output", 50 )
     add_shortcut( "duplicate", "dup" )
     set_category( CAT_SOUT )
     set_subcategory( SUBCAT_SOUT_STREAM )
@@ -53,12 +52,11 @@ vlc_module_end ()
 /*****************************************************************************
  * Exported prototypes
  *****************************************************************************/
-static sout_stream_id_t *Add ( sout_stream_t *, es_format_t * );
-static int               Del ( sout_stream_t *, sout_stream_id_t * );
-static int               Send( sout_stream_t *, sout_stream_id_t *,
-                               block_t* );
+static void *Add( sout_stream_t *, const es_format_t * );
+static void  Del( sout_stream_t *, void * );
+static int   Send( sout_stream_t *, void *, block_t * );
 
-struct sout_stream_sys_t
+typedef struct
 {
     int             i_nb_streams;
     sout_stream_t   **pp_streams;
@@ -68,15 +66,42 @@ struct sout_stream_sys_t
 
     int             i_nb_select;
     char            **ppsz_select;
-};
+} sout_stream_sys_t;
 
-struct sout_stream_id_t
+typedef struct
 {
     int                 i_nb_ids;
     void                **pp_ids;
-};
+} sout_stream_id_sys_t;
 
-static bool ESSelected( es_format_t *fmt, char *psz_select );
+static bool ESSelected( const es_format_t *fmt, char *psz_select );
+
+/*****************************************************************************
+ * Control
+ *****************************************************************************/
+static int Control( sout_stream_t *p_stream, int i_query, va_list args )
+{
+    sout_stream_sys_t *p_sys = p_stream->p_sys;
+
+    /* Fanout controls */
+    switch( i_query )
+    {
+        case SOUT_STREAM_ID_SPU_HIGHLIGHT:
+        {
+            sout_stream_id_sys_t *id = va_arg(args, void *);
+            void *spu_hl = va_arg(args, void *);
+            for( int i = 0; i < id->i_nb_ids; i++ )
+            {
+                if( id->pp_ids[i] )
+                    sout_StreamControl( p_sys->pp_streams[i], i_query,
+                                        id->pp_ids[i], spu_hl );
+            }
+            return VLC_SUCCESS;
+        }
+    }
+
+    return VLC_EGENERIC;
+}
 
 /*****************************************************************************
  * Open:
@@ -151,6 +176,7 @@ static int Open( vlc_object_t *p_this )
     p_stream->pf_add    = Add;
     p_stream->pf_del    = Del;
     p_stream->pf_send   = Send;
+    p_stream->pf_control = Control;
 
     p_stream->p_sys     = p_sys;
 
@@ -165,10 +191,8 @@ static void Close( vlc_object_t * p_this )
     sout_stream_t     *p_stream = (sout_stream_t*)p_this;
     sout_stream_sys_t *p_sys = p_stream->p_sys;
 
-    int i;
-
     msg_Dbg( p_stream, "closing a duplication" );
-    for( i = 0; i < p_sys->i_nb_streams; i++ )
+    for( int i = 0; i < p_sys->i_nb_streams; i++ )
     {
         sout_StreamChainDelete(p_sys->pp_streams[i], p_sys->pp_last_streams[i]);
         free( p_sys->ppsz_select[i] );
@@ -183,13 +207,13 @@ static void Close( vlc_object_t * p_this )
 /*****************************************************************************
  * Add:
  *****************************************************************************/
-static sout_stream_id_t * Add( sout_stream_t *p_stream, es_format_t *p_fmt )
+static void *Add( sout_stream_t *p_stream, const es_format_t *p_fmt )
 {
     sout_stream_sys_t *p_sys = p_stream->p_sys;
-    sout_stream_id_t  *id;
+    sout_stream_id_sys_t  *id;
     int i_stream, i_valid_streams = 0;
 
-    id = malloc( sizeof( sout_stream_id_t ) );
+    id = malloc( sizeof( sout_stream_id_sys_t ) );
     if( !id )
         return NULL;
 
@@ -239,9 +263,10 @@ static sout_stream_id_t * Add( sout_stream_t *p_stream, es_format_t *p_fmt )
 /*****************************************************************************
  * Del:
  *****************************************************************************/
-static int Del( sout_stream_t *p_stream, sout_stream_id_t *id )
+static void Del( sout_stream_t *p_stream, void *_id )
 {
     sout_stream_sys_t *p_sys = p_stream->p_sys;
+    sout_stream_id_sys_t *id = (sout_stream_id_sys_t *)_id;
     int               i_stream;
 
     for( i_stream = 0; i_stream < p_sys->i_nb_streams; i_stream++ )
@@ -255,16 +280,15 @@ static int Del( sout_stream_t *p_stream, sout_stream_id_t *id )
 
     free( id->pp_ids );
     free( id );
-    return VLC_SUCCESS;
 }
 
 /*****************************************************************************
  * Send:
  *****************************************************************************/
-static int Send( sout_stream_t *p_stream, sout_stream_id_t *id,
-                 block_t *p_buffer )
+static int Send( sout_stream_t *p_stream, void *_id, block_t *p_buffer )
 {
     sout_stream_sys_t *p_sys = p_stream->p_sys;
+    sout_stream_id_sys_t *id = (sout_stream_id_sys_t *)_id;
     sout_stream_t     *p_dup_stream;
     int               i_stream;
 
@@ -308,28 +332,17 @@ static int Send( sout_stream_t *p_stream, sout_stream_id_t *id,
  *****************************************************************************/
 static bool NumInRange( const char *psz_range, int i_num )
 {
-    const char *psz = strchr( psz_range, '-' );
-    char *end;
-    int  i_start, i_stop;
-
-    i_start = strtol( psz_range, &end, 0 );
-    if( end == psz_range )
-        i_start = i_num;
-
-    if( psz )
-    {
-        psz++;
-        i_stop = strtol( psz, &end, 0 );
-        if( end == psz )
-            i_stop = i_num;
-    }
-    else
-        i_stop = i_start;
-
-    return i_start <= i_num && i_num <= i_stop;
+    int beginRange, endRange;
+    int res = sscanf(psz_range, "%d-%d", &beginRange, &endRange);
+    if (res == 0)
+        return false;
+    else if (res == 1)
+        return beginRange == i_num;
+    return (i_num >= beginRange && i_num <= endRange)
+        || (beginRange > endRange && (i_num <= beginRange && i_num >= endRange));
 }
 
-static bool ESSelected( es_format_t *fmt, char *psz_select )
+static bool ESSelected( const es_format_t *fmt, char *psz_select )
 {
     char  *psz_dup;
     char  *psz;

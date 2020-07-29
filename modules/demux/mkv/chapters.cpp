@@ -2,7 +2,6 @@
  * chapters.cpp : matroska demuxer
  *****************************************************************************
  * Copyright (C) 2003-2004 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir@via.ecp.fr>
  *          Steve Lhomme <steve.lhomme@free.fr>
@@ -26,12 +25,15 @@
 
 #include "chapter_command.hpp"
 
+#include <functional>
+#include <algorithm>
+
+namespace mkv {
+
 chapter_item_c::~chapter_item_c()
 {
-    if( p_segment_uid )
-        delete p_segment_uid;
-    if( p_segment_edition_uid )
-        delete p_segment_edition_uid;
+    delete p_segment_uid;
+    delete p_segment_edition_uid;
     vlc_delete_all( codecs );
     vlc_delete_all( sub_chapters );
 }
@@ -98,7 +100,7 @@ std::string chapter_item_c::GetCodecName( bool f_for_title ) const
     while ( index != codecs.end() )
     {
         result = (*index)->GetCodecName( f_for_title );
-        if ( result != "" )
+        if ( !result.empty () )
             break;
         ++index;
     }
@@ -138,57 +140,51 @@ bool chapter_item_c::ParentOf( const chapter_item_c & item ) const
     return false;
 }
 
-bool chapter_item_c::Enter( bool b_do_subs )
-{
+bool chapter_item_c::EnterLeaveHelper_ ( bool do_subs,
+    bool (chapter_codec_cmds_c::* co_cb) (),
+    bool (chapter_item_c      ::* ch_cb) (bool)
+) {
     bool f_result = false;
-    std::vector<chapter_codec_cmds_c*>::iterator index = codecs.begin();
-    while ( index != codecs.end() )
+
+    f_result |= std::count_if ( codecs.begin (), codecs.end (),
+      std::mem_fn (co_cb)
+    );
+
+    if ( do_subs )
     {
-        f_result |= (*index)->Enter();
-        ++index;
+        using std::placeholders::_1;
+        f_result |= count_if ( sub_chapters.begin (), sub_chapters.end (),
+          std::bind( std::mem_fn( ch_cb ), _1, true )
+        );
     }
 
-    if ( b_do_subs )
-    {
-        // sub chapters
-        std::vector<chapter_item_c*>::iterator index_ = sub_chapters.begin();
-        while ( index_ != sub_chapters.end() )
-        {
-            f_result |= (*index_)->Enter( true );
-            ++index_;
-        }
-    }
     return f_result;
+}
+
+bool chapter_item_c::Enter( bool b_do_subs )
+{
+    return EnterLeaveHelper_ (b_do_subs,
+      &chapter_codec_cmds_c::Enter,
+      &chapter_item_c::Enter
+    );
 }
 
 bool chapter_item_c::Leave( bool b_do_subs )
 {
-    bool f_result = false;
     b_is_leaving = true;
-    std::vector<chapter_codec_cmds_c*>::iterator index = codecs.begin();
-    while ( index != codecs.end() )
-    {
-        f_result |= (*index)->Leave();
-        ++index;
-    }
 
-    if ( b_do_subs )
-    {
-        // sub chapters
-        std::vector<chapter_item_c*>::iterator index_ = sub_chapters.begin();
-        while ( index_ != sub_chapters.end() )
-        {
-            f_result |= (*index_)->Leave( true );
-            ++index_;
-        }
-    }
+    bool f_result = EnterLeaveHelper_ (b_do_subs,
+      &chapter_codec_cmds_c::Leave,
+      &chapter_item_c::Leave
+    );
+
     b_is_leaving = false;
     return f_result;
 }
 
-bool chapter_item_c::EnterAndLeave( chapter_item_c *p_item, bool b_final_enter )
+bool chapter_item_c::EnterAndLeave( chapter_item_c *p_leaving_chapter, bool b_final_enter )
 {
-    chapter_item_c *p_common_parent = p_item;
+    chapter_item_c *p_common_parent = p_leaving_chapter;
 
     // leave, up to a common parent
     while ( p_common_parent != NULL && !p_common_parent->ParentOf( *this ) )
@@ -239,3 +235,4 @@ std::string chapter_edition_c::GetMainName() const
     return "";
 }
 
+} // namespace

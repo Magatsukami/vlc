@@ -2,7 +2,6 @@
  * var_list.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -25,7 +24,7 @@
 #include "var_list.hpp"
 
 
-const string VarList::m_type = "list";
+const std::string VarList::m_type = "list";
 
 
 VarList::VarList( intf_thread_t *pIntf ): Variable( pIntf )
@@ -56,12 +55,12 @@ void VarList::delSelected()
         if( (*it).m_selected )
         {
             Iterator oldIt = it;
-            it++;
+            ++it;
             m_list.erase( oldIt );
         }
         else
         {
-            it++;
+            ++it;
         }
     }
     notify();

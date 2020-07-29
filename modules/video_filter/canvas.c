@@ -2,7 +2,6 @@
  * canvas.c : automatically resize and padd a video to fit in canvas
  *****************************************************************************
  * Copyright (C) 2008 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Antoine Cellerier <dionoea at videolan dot org>
  *
@@ -34,6 +33,7 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_filter.h>
+#include <vlc_picture.h>
 
 /*****************************************************************************
  * Local and extern prototypes.
@@ -41,7 +41,6 @@
 static int  Activate( vlc_object_t * );
 static void Destroy( vlc_object_t * );
 static picture_t *Filter( filter_t *, picture_t * );
-static int alloc_init( filter_t *, void * );
 
 /* This module effectively implements a form of picture-in-picture.
  *  - The outer picture is called the canvas.
@@ -104,7 +103,7 @@ static int alloc_init( filter_t *, void * );
 vlc_module_begin ()
     set_shortname( N_("Canvas") )
     set_description( N_("Canvas video filter") )
-    set_capability( "video filter2", 0 )
+    set_capability( "video filter", 0 )
     set_help( CANVAS_HELP )
     set_callbacks( Activate, Destroy )
 
@@ -127,9 +126,22 @@ static const char *const ppsz_filter_options[] = {
     "width", "height", "aspect", "padd", NULL
 };
 
-struct filter_sys_t
+typedef struct
 {
     filter_chain_t *p_chain;
+} filter_sys_t;
+
+static picture_t *video_chain_new( filter_t *p_filter )
+{
+    filter_t *p_chain_parent = p_filter->owner.sys;
+    // the last filter of the internal chain gets its pictures from the original
+    // filter source
+    return filter_NewPicture( p_chain_parent );
+}
+
+static const struct filter_video_callbacks canvas_cbs =
+{
+    video_chain_new, NULL,
 };
 
 /*****************************************************************************
@@ -226,8 +238,12 @@ static int Activate( vlc_object_t *p_this )
         return VLC_ENOMEM;
     p_filter->p_sys = p_sys;
 
-    p_sys->p_chain = filter_chain_New( p_filter, "video filter2", true,
-                                       alloc_init, NULL, p_filter );
+    filter_owner_t owner = {
+        .video = &canvas_cbs,
+        .sys = p_filter,
+    };
+
+    p_sys->p_chain = filter_chain_NewVideo( p_filter, true, &owner );
     if( !p_sys->p_chain )
     {
         msg_Err( p_filter, "Could not allocate filter chain" );
@@ -317,14 +333,29 @@ static int Activate( vlc_object_t *p_this )
     fmt.video.i_width = p_filter->fmt_in.video.i_width * fmt.video.i_visible_width / p_filter->fmt_in.video.i_visible_width;
     fmt.video.i_height = p_filter->fmt_in.video.i_height * fmt.video.i_visible_height / p_filter->fmt_in.video.i_visible_height;
 
-    filter_chain_Reset( p_sys->p_chain, &p_filter->fmt_in, &fmt );
+    filter_chain_Reset( p_sys->p_chain, &p_filter->fmt_in, p_filter->vctx_in, &fmt );
     /* Append scaling module */
-    filter_chain_AppendFilter( p_sys->p_chain, NULL, NULL, NULL, NULL );
-    /* Append padding module */
-    filter_chain_AppendFromString( p_sys->p_chain, psz_croppadd );
+    if ( filter_chain_AppendConverter( p_sys->p_chain, NULL ) )
+    {
+        msg_Err( p_filter, "Could not append scaling filter" );
+        free( p_sys );
+        return VLC_EGENERIC;
+    }
 
-    fmt = *filter_chain_GetFmtOut( p_sys->p_chain );
-    es_format_Copy( &p_filter->fmt_out, &fmt );
+    /* Append croppadd module if we actually do cropping or padding instead of just scaling*/
+    if( i_padd > 0 )
+    {
+        if ( !filter_chain_AppendFromString( p_sys->p_chain, psz_croppadd ) )
+        {
+            msg_Err( p_filter, "Could not append croppadd filter" );
+            filter_chain_Delete( p_sys->p_chain );
+            free( p_sys );
+            return VLC_EGENERIC;
+        }
+    }
+
+    es_format_Copy( &p_filter->fmt_out,
+                    filter_chain_GetFmtOut( p_sys->p_chain ) );
 
     vlc_ureduce( &p_filter->fmt_out.video.i_sar_num,
         &p_filter->fmt_out.video.i_sar_den,
@@ -353,8 +384,9 @@ static int Activate( vlc_object_t *p_this )
 static void Destroy( vlc_object_t *p_this )
 {
     filter_t *p_filter = (filter_t *)p_this;
-    filter_chain_Delete( p_filter->p_sys->p_chain );
-    free( p_filter->p_sys );
+    filter_sys_t *p_sys = p_filter->p_sys;
+    filter_chain_Delete( p_sys->p_chain );
+    free( p_sys );
 }
 
 /*****************************************************************************
@@ -362,26 +394,6 @@ static void Destroy( vlc_object_t *p_this )
  *****************************************************************************/
 static picture_t *Filter( filter_t *p_filter, picture_t *p_pic )
 {
-    return filter_chain_VideoFilter( p_filter->p_sys->p_chain, p_pic );
-}
-
-/*****************************************************************************
- *
- *****************************************************************************/
-static picture_t *video_new( filter_t *p_filter )
-{
-    return filter_NewPicture( (filter_t*)p_filter->p_owner );
-}
-
-static void video_del( filter_t *p_filter, picture_t *p_pic )
-{
-    return filter_DeletePicture( (filter_t*)p_filter->p_owner, p_pic );
-}
-
-static int alloc_init( filter_t *p_filter, void *p_data )
-{
-    p_filter->p_owner = p_data;
-    p_filter->pf_video_buffer_new = video_new;
-    p_filter->pf_video_buffer_del = video_del;
-    return VLC_SUCCESS;
+    filter_sys_t *p_sys = p_filter->p_sys;
+    return filter_chain_VideoFilter( p_sys->p_chain, p_pic );
 }

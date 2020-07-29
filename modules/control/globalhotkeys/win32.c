@@ -26,10 +26,11 @@
 
 #include <ctype.h>
 
+#define VLC_MODULE_LICENSE VLC_LICENSE_GPL_2_PLUS
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_interface.h>
-#include <vlc_keys.h>
+#include <vlc_actions.h>
 
 /*****************************************************************************
  * Local prototypes
@@ -78,8 +79,6 @@ static int Open( vlc_object_t *p_this )
 
     if( vlc_clone( &p_sys->thread, Thread, p_intf, VLC_THREAD_PRIORITY_LOW ) )
     {
-        vlc_mutex_destroy( &p_sys->lock );
-        vlc_cond_destroy( &p_sys->wait );
         free( p_sys );
         p_intf->p_sys = NULL;
 
@@ -93,8 +92,6 @@ static int Open( vlc_object_t *p_this )
     {
         vlc_mutex_unlock( &p_sys->lock );
         vlc_join( p_sys->thread, NULL );
-        vlc_mutex_destroy( &p_sys->lock );
-        vlc_cond_destroy( &p_sys->wait );
         free( p_sys );
         p_intf->p_sys = NULL;
 
@@ -120,8 +117,6 @@ static void Close( vlc_object_t *p_this )
     vlc_mutex_unlock( &p_sys->lock );
 
     vlc_join( p_sys->thread, NULL );
-    vlc_mutex_destroy( &p_sys->lock );
-    vlc_cond_destroy( &p_sys->wait );
     free( p_sys );
 }
 
@@ -138,8 +133,8 @@ static void *Thread( void *p_data )
     /* Window which receives Hotkeys */
     vlc_mutex_lock( &p_sys->lock );
     p_sys->hotkeyWindow =
-        (void*)CreateWindow( _T("STATIC"),           /* name of window class */
-                _T("VLC ghk ") _T(VERSION),         /* window title bar text */
+        (void*)CreateWindow( TEXT("STATIC"),         /* name of window class */
+                TEXT("VLC ghk ") TEXT(VERSION),     /* window title bar text */
                 0,                                           /* window style */
                 0,                                   /* default X coordinate */
                 0,                                   /* default Y coordinate */
@@ -166,26 +161,19 @@ static void *Thread( void *p_data )
             (LONG_PTR)p_intf );
 
     /* Registering of Hotkeys */
-    for( const struct hotkey *p_hotkey = p_intf->p_libvlc->p_hotkeys;
-            p_hotkey->psz_action != NULL;
-            p_hotkey++ )
+    for( const char* const* ppsz_keys = vlc_actions_get_key_names( p_intf );
+         *ppsz_keys != NULL; ppsz_keys++ )
     {
-        char varname[12 + strlen( p_hotkey->psz_action )];
-        sprintf( varname, "global-key-%s", p_hotkey->psz_action );
-
-        char *key = var_InheritString( p_intf, varname );
-        if( key == NULL )
-            continue;
-
-        UINT i_key = vlc_str2keycode( key );
-        free( key );
-        if( i_key == KEY_UNSET )
-            continue;
-
-        UINT i_keyMod = 0;
-        if( i_key & KEY_MODIFIER_SHIFT ) i_keyMod |= MOD_SHIFT;
-        if( i_key & KEY_MODIFIER_ALT ) i_keyMod |= MOD_ALT;
-        if( i_key & KEY_MODIFIER_CTRL ) i_keyMod |= MOD_CONTROL;
+        uint_fast32_t *p_keys;
+        size_t i_nb_keys = vlc_actions_get_keycodes( p_intf, *ppsz_keys, true,
+                                                     &p_keys );
+        for( size_t i = 0; i < i_nb_keys; ++i )
+        {
+            uint_fast32_t i_key = p_keys[i];
+            UINT i_keyMod = 0;
+            if( i_key & KEY_MODIFIER_SHIFT ) i_keyMod |= MOD_SHIFT;
+            if( i_key & KEY_MODIFIER_ALT ) i_keyMod |= MOD_ALT;
+            if( i_key & KEY_MODIFIER_CTRL ) i_keyMod |= MOD_CONTROL;
 
 #define HANDLE( key ) case KEY_##key: i_vk = VK_##key; break
 #define HANDLE2( key, key2 ) case KEY_##key: i_vk = VK_##key2; break
@@ -209,55 +197,57 @@ static void *Thread( void *p_data )
 #define VK_PAGEDOWN             0x22
 #endif
 
-        UINT i_vk = 0;
-        switch( i_key & ~KEY_MODIFIER )
-        {
-            HANDLE( LEFT );
-            HANDLE( RIGHT );
-            HANDLE( UP );
-            HANDLE( DOWN );
-            HANDLE( SPACE );
-            HANDLE2( ESC, ESCAPE );
-            HANDLE2( ENTER, RETURN );
-            HANDLE( F1 );
-            HANDLE( F2 );
-            HANDLE( F3 );
-            HANDLE( F4 );
-            HANDLE( F5 );
-            HANDLE( F6 );
-            HANDLE( F7 );
-            HANDLE( F8 );
-            HANDLE( F9 );
-            HANDLE( F10 );
-            HANDLE( F11 );
-            HANDLE( F12 );
-            HANDLE( PAGEUP );
-            HANDLE( PAGEDOWN );
-            HANDLE( HOME );
-            HANDLE( END );
-            HANDLE( INSERT );
-            HANDLE( DELETE );
-            HANDLE( VOLUME_DOWN );
-            HANDLE( VOLUME_UP );
-            HANDLE( MEDIA_PLAY_PAUSE );
-            HANDLE( MEDIA_STOP );
-            HANDLE( MEDIA_PREV_TRACK );
-            HANDLE( MEDIA_NEXT_TRACK );
+            UINT i_vk = 0;
+            switch( i_key & ~KEY_MODIFIER )
+            {
+                HANDLE( LEFT );
+                HANDLE( RIGHT );
+                HANDLE( UP );
+                HANDLE( DOWN );
+                HANDLE( SPACE );
+                HANDLE2( ESC, ESCAPE );
+                HANDLE2( ENTER, RETURN );
+                HANDLE( F1 );
+                HANDLE( F2 );
+                HANDLE( F3 );
+                HANDLE( F4 );
+                HANDLE( F5 );
+                HANDLE( F6 );
+                HANDLE( F7 );
+                HANDLE( F8 );
+                HANDLE( F9 );
+                HANDLE( F10 );
+                HANDLE( F11 );
+                HANDLE( F12 );
+                HANDLE( PAGEUP );
+                HANDLE( PAGEDOWN );
+                HANDLE( HOME );
+                HANDLE( END );
+                HANDLE( INSERT );
+                HANDLE( DELETE );
+                HANDLE( VOLUME_DOWN );
+                HANDLE( VOLUME_UP );
+                HANDLE( MEDIA_PLAY_PAUSE );
+                HANDLE( MEDIA_STOP );
+                HANDLE( MEDIA_PREV_TRACK );
+                HANDLE( MEDIA_NEXT_TRACK );
 
-            default:
-                i_vk = toupper( (uint8_t)(i_key & ~KEY_MODIFIER) );
-                break;
-        }
-        if( !i_vk ) continue;
+                default:
+                    i_vk = toupper( (uint8_t)(i_key & ~KEY_MODIFIER) );
+                    break;
+            }
+            if( !i_vk ) continue;
 
 #undef HANDLE
 #undef HANDLE2
 
-        ATOM atom = GlobalAddAtomA( p_hotkey->psz_action );
-        if( !atom ) continue;
+            ATOM atom = GlobalAddAtomA( *ppsz_keys );
+            if( !atom ) continue;
 
-        if( !RegisterHotKey( p_sys->hotkeyWindow, atom, i_keyMod, i_vk ) )
-            GlobalDeleteAtom( atom );
+            if( !RegisterHotKey( p_sys->hotkeyWindow, atom, i_keyMod, i_vk ) )
+                GlobalDeleteAtom( atom );
+        }
+        free( p_keys );
     }
 
     /* Main message loop */
@@ -265,11 +255,10 @@ static void *Thread( void *p_data )
         DispatchMessage( &message );
 
     /* Unregistering of Hotkeys */
-    for( const struct hotkey *p_hotkey = p_intf->p_libvlc->p_hotkeys;
-            p_hotkey->psz_action != NULL;
-            p_hotkey++ )
+    for( const char* const* ppsz_keys = vlc_actions_get_key_names( p_intf );
+         *ppsz_keys != NULL; ppsz_keys++ )
     {
-        ATOM atom = GlobalFindAtomA( p_hotkey->psz_action );
+        ATOM atom = GlobalFindAtomA( *ppsz_keys );
         if( !atom ) continue;
 
         if( UnregisterHotKey( p_sys->hotkeyWindow, atom ) )
@@ -307,10 +296,10 @@ LRESULT CALLBACK WMHOTKEYPROC( HWND hwnd, UINT uMsg, WPARAM wParam,
                     return 0;
 
                 /* search for key associated with VLC */
-                vlc_action_t action = vlc_GetActionId( psz_atomName );
+                vlc_action_id_t action = vlc_actions_get_id( psz_atomName );
                 if( action != ACTIONID_NONE )
                 {
-                    var_SetInteger( p_intf->p_libvlc,
+                    var_SetInteger( vlc_object_instance(p_intf),
                             "key-action", action );
                     return 1;
                 }

@@ -61,11 +61,11 @@ static int SetupStandard (vlc_object_t *obj, int fd,
     }
     if (v4l2_ioctl (fd, VIDIOC_S_STD, std) < 0)
     {
-        msg_Err (obj, "cannot set video standard 0x%"PRIx64": %s", *std,
-                 vlc_strerror_c(errno));
+        msg_Err (obj, "cannot set video standard 0x%"PRIx64": %s",
+                 (uint64_t)*std, vlc_strerror_c(errno));
         return -1;
     }
-    msg_Dbg (obj, "video standard set to 0x%"PRIx64":", *std);
+    msg_Dbg (obj, "video standard set to 0x%"PRIx64":", (uint64_t)*std);
     return 0;
 }
 
@@ -308,15 +308,19 @@ static int64_t fcmp (const struct v4l2_fract *a,
 }
 
 static const struct v4l2_fract infinity = { 1, 0 };
+static const struct v4l2_fract zero = { 0, 1 };
 
 /**
- * Finds the highest frame rate possible of a certain V4L2 format.
+ * Finds the highest frame rate up to a specific limit possible with a certain
+ * V4L2 format.
  * @param fmt V4L2 capture format [IN]
+ * @param min_it minimum frame internal [IN]
  * @param it V4L2 frame interval [OUT]
  * @return 0 on success, -1 on error.
  */
 static int FindMaxRate (vlc_object_t *obj, int fd,
                         const struct v4l2_format *restrict fmt,
+                        const struct v4l2_fract *restrict min_it,
                         struct v4l2_fract *restrict it)
 {
     struct v4l2_frmivalenum fie = {
@@ -354,7 +358,8 @@ static int FindMaxRate (vlc_object_t *obj, int fd,
             *it = infinity;
             do
             {
-                if (fcmp (&fie.discrete, it) < 0)
+                if (fcmp (&fie.discrete, min_it) >= 0
+                 && fcmp (&fie.discrete, it) < 0)
                     *it = fie.discrete;
                 fie.index++;
             }
@@ -374,7 +379,29 @@ static int FindMaxRate (vlc_object_t *obj, int fd,
                 msg_Dbg (obj, "  with %"PRIu32"/%"PRIu32" step",
                          fie.stepwise.step.numerator,
                          fie.stepwise.step.denominator);
-            *it = fie.stepwise.min;
+
+            if (fcmp (&fie.stepwise.max, min_it) < 0)
+            {
+                *it = infinity;
+                return -1;
+            }
+
+            if (fcmp (&fie.stepwise.min, min_it) >= 0)
+            {
+                *it = fie.stepwise.min;
+                break;
+            }
+
+            if (fie.type == V4L2_FRMIVAL_TYPE_CONTINUOUS)
+            {
+                *it = *min_it;
+                break;
+            }
+
+            it->numerator *= fie.stepwise.step.denominator;
+            it->denominator *= fie.stepwise.step.denominator;
+            while (fcmp (it, min_it) < 0)
+                it->numerator += fie.stepwise.step.numerator;
             break;
     }
     return 0;
@@ -407,8 +434,15 @@ int SetupFormat (vlc_object_t *obj, int fd, uint32_t fourcc,
     struct v4l2_frmsizeenum fse = {
         .pixel_format = fourcc,
     };
-    struct v4l2_fract best_it = infinity;
+    struct v4l2_fract best_it = infinity, min_it;
     uint64_t best_area = 0;
+
+    if (var_InheritURational(obj, &min_it.denominator, &min_it.numerator,
+                             CFG_PREFIX"fps") == VLC_SUCCESS)
+        msg_Dbg (obj, " requested frame internal: %"PRIu32"/%"PRIu32,
+                 min_it.numerator, min_it.denominator);
+    else
+        min_it = zero;
 
     uint32_t width = var_InheritInteger (obj, CFG_PREFIX"width");
     uint32_t height = var_InheritInteger (obj, CFG_PREFIX"height");
@@ -418,7 +452,7 @@ int SetupFormat (vlc_object_t *obj, int fd, uint32_t fourcc,
         fmt->fmt.pix.height = height;
         msg_Dbg (obj, " requested frame size: %"PRIu32"x%"PRIu32,
                  width, height);
-        FindMaxRate (obj, fd, fmt, &best_it);
+        FindMaxRate (obj, fd, fmt, &min_it, &best_it);
     }
     else
     if (v4l2_ioctl (fd, VIDIOC_ENUM_FRAMESIZES, &fse) < 0)
@@ -427,7 +461,7 @@ int SetupFormat (vlc_object_t *obj, int fd, uint32_t fourcc,
         msg_Dbg (obj, " unknown frame sizes: %s", vlc_strerror_c(errno));
         msg_Dbg (obj, " current frame size: %"PRIu32"x%"PRIu32,
                  fmt->fmt.pix.width, fmt->fmt.pix.height);
-        FindMaxRate (obj, fd, fmt, &best_it);
+        FindMaxRate (obj, fd, fmt, &min_it, &best_it);
     }
     else
     switch (fse.type)
@@ -439,7 +473,7 @@ int SetupFormat (vlc_object_t *obj, int fd, uint32_t fourcc,
 
                 msg_Dbg (obj, " frame size %"PRIu32"x%"PRIu32,
                          fse.discrete.width, fse.discrete.height);
-                FindMaxRate (obj, fd, fmt, &cur_it);
+                FindMaxRate (obj, fd, fmt, &min_it, &cur_it);
 
                 int64_t c = fcmp (&cur_it, &best_it);
                 uint64_t area = fse.discrete.width * fse.discrete.height;
@@ -470,16 +504,16 @@ int SetupFormat (vlc_object_t *obj, int fd, uint32_t fourcc,
                          fse.stepwise.step_width, fse.stepwise.step_height);
 
             /* FIXME: slow and dumb */
-            for (uint32_t width =  fse.stepwise.min_width;
-                          width <= fse.stepwise.max_width;
-                          width += fse.stepwise.step_width)
-                for (uint32_t height =  fse.stepwise.min_height;
-                              height <= fse.stepwise.max_width;
-                              height += fse.stepwise.step_height)
+            for (width =  fse.stepwise.min_width;
+                 width <= fse.stepwise.max_width;
+                 width += fse.stepwise.step_width)
+                for (height =  fse.stepwise.min_height;
+                     height <= fse.stepwise.max_height;
+                     height += fse.stepwise.step_height)
                 {
                     struct v4l2_fract cur_it;
 
-                    FindMaxRate (obj, fd, fmt, &cur_it);
+                    FindMaxRate (obj, fd, fmt, &min_it, &cur_it);
 
                     int64_t c = fcmp (&cur_it, &best_it);
                     uint64_t area = width * height;
@@ -526,20 +560,18 @@ int SetupFormat (vlc_object_t *obj, int fd, uint32_t fourcc,
     return 0;
 }
 
-mtime_t GetBufferPTS (const struct v4l2_buffer *buf)
+vlc_tick_t GetBufferPTS (const struct v4l2_buffer *buf)
 {
-    mtime_t pts;
+    vlc_tick_t pts;
 
     switch (buf->flags & V4L2_BUF_FLAG_TIMESTAMP_MASK)
     {
         case V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC:
-            pts = (buf->timestamp.tv_sec * CLOCK_FREQ)
-                 + buf->timestamp.tv_usec;
-            static_assert (CLOCK_FREQ == 1000000, "Clock unit mismatch");
+            pts = vlc_tick_from_timeval( &buf->timestamp );
             break;
         case V4L2_BUF_FLAG_TIMESTAMP_UNKNOWN:
         default:
-            pts = mdate ();
+            pts = vlc_tick_now ();
             break;
     }
     return pts;
@@ -639,7 +671,7 @@ struct buffer_t *StartMmap (vlc_object_t *obj, int fd, uint32_t *restrict n)
         return NULL;
     }
 
-    struct buffer_t *bufv = malloc (req.count * sizeof (*bufv));
+    struct buffer_t *bufv = vlc_alloc (req.count, sizeof (*bufv));
     if (unlikely(bufv == NULL))
         return NULL;
 

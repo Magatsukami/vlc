@@ -2,7 +2,6 @@
  * mms.h: MMS access plug-in
  *****************************************************************************
  * Copyright (C) 2001, 2002 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir@via.ecp.fr>
  *
@@ -21,8 +20,8 @@
  * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
  *****************************************************************************/
 
-#ifndef _MMS_H_
-#define _MMS_H_ 1
+#ifndef VLC_MMS_MMS_H_
+#define VLC_MMS_MMS_H_
 
 #define MMS_PROTO_AUTO  0
 #define MMS_PROTO_TCP   1
@@ -30,12 +29,12 @@
 #define MMS_PROTO_HTTP  3
 
 /* mmst and mmsu */
-int   MMSTUOpen   ( access_t * );
-void  MMSTUClose  ( access_t * );
+int   MMSTUOpen   ( stream_t * );
+void  MMSTUClose  ( stream_t * );
 
 /* mmsh */
-int   MMSHOpen   ( access_t * );
-void  MMSHClose  ( access_t * );
+int   MMSHOpen   ( stream_t * );
+void  MMSHClose  ( stream_t * );
 
 #endif
 

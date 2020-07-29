@@ -1,7 +1,7 @@
 /*****************************************************************************
  * rdp.c: libfreeRDP based Remote Desktop access
  *****************************************************************************
- * Copyright (C) 2013 VideoLAN Authors
+ * Copyright (C) 2013 VideoLAN and VLC Authors
  *****************************************************************************
  *
  * This program is free software; you can redistribute it and/or modify it
@@ -41,14 +41,34 @@
 #include <freerdp/channels/channels.h>
 #include <freerdp/gdi/gdi.h>
 
+#if !defined(FREERDP_INTERFACE_VERSION)
+# include <freerdp/version.h>
+#endif
+
+#if !defined(FREERDP_VERSION_MAJOR) || \
+    (defined(FREERDP_VERSION_MAJOR) && !(FREERDP_VERSION_MAJOR > 1 || (FREERDP_VERSION_MAJOR == 1 && FREERDP_VERSION_MINOR >= 1)))
+# define SoftwareGdi sw_gdi
+# define Fullscreen fullscreen
+# define ServerHostname hostname
+# define Username username
+# define Password password
+# define ServerPort port
+# define EncryptionMethods encryption
+# define ContextSize context_size
+#endif
+
 #include <errno.h>
-#ifdef HAVE_POLL
+#ifdef HAVE_POLL_H
 # include <poll.h>
 #endif
 
-#define RDP_USER N_("RDP auth username")
-#define RDP_PASSWORD N_("RDP auth password")
-#define RDP_PASSWORD_LONGTEXT N_("RDP Password")
+#define USER_TEXT N_("Username")
+#define USER_LONGTEXT N_("Username that will be used for the connection, " \
+        "if no username is set in the URL.")
+#define PASS_TEXT N_("Password")
+#define PASS_LONGTEXT N_("Password that will be used for the connection, " \
+        "if no username or password are set in URL.")
+
 #define RDP_ENCRYPT N_("Encrypted connexion")
 #define RDP_FPS N_("Frame rate")
 #define RDP_FPS_LONGTEXT N_("Acquisition rate (in fps)")
@@ -67,11 +87,11 @@ vlc_module_begin()
     set_category( CAT_INPUT )
     set_subcategory( SUBCAT_INPUT_ACCESS )
     set_description( N_("RDP Remote Desktop") )
-    set_capability( "access_demux", 10 )
+    set_capability( "access", 0 )
 
-    add_string( CFG_PREFIX "user", NULL, RDP_USER, RDP_USER, false )
+    add_string( CFG_PREFIX "user", NULL, USER_TEXT, USER_LONGTEXT, false )
         change_safe()
-    add_password( CFG_PREFIX "password", NULL, RDP_PASSWORD, RDP_PASSWORD_LONGTEXT, false )
+    add_password(CFG_PREFIX "password", NULL, PASS_TEXT, PASS_LONGTEXT)
         change_safe()
     add_float( CFG_PREFIX "fps", 5, RDP_FPS, RDP_FPS_LONGTEXT, true )
 
@@ -83,7 +103,7 @@ vlc_module_end()
 
 #define RDP_MAX_FD 32
 
-struct demux_sys_t
+typedef struct
 {
     vlc_thread_t thread;
     freerdp *p_instance;
@@ -92,16 +112,14 @@ struct demux_sys_t
 
     float f_fps;
     int i_frame_interval;
-    mtime_t i_starttime;
+    vlc_tick_t i_starttime;
 
     es_out_id_t *es;
 
     /* pre-connect params */
     char *psz_hostname;
     int i_port;
-    /* cancelability */
-    int i_cancel_state;
-};
+} demux_sys_t;
 
 /* context */
 
@@ -198,15 +216,15 @@ static bool preConnectHandler( freerdp *p_instance )
     demux_sys_t *p_sys = p_vlccontext->p_demux->p_sys;
 
     /* Configure connexion */
-    p_instance->settings->sw_gdi = true; /* render in buffer */
-    p_instance->settings->fullscreen = true;
-    p_instance->settings->hostname = strdup( p_sys->psz_hostname );
-    p_instance->settings->username =
+    p_instance->settings->SoftwareGdi = true; /* render in buffer */
+    p_instance->settings->Fullscreen = true;
+    p_instance->settings->ServerHostname = strdup( p_sys->psz_hostname );
+    p_instance->settings->Username =
             var_InheritString( p_vlccontext->p_demux, CFG_PREFIX "user" );
-    p_instance->settings->password =
+    p_instance->settings->Password =
             var_InheritString( p_vlccontext->p_demux, CFG_PREFIX "password" );
-    p_instance->settings->port = p_sys->i_port;
-    p_instance->settings->encryption =
+    p_instance->settings->ServerPort = p_sys->i_port;
+    p_instance->settings->EncryptionMethods =
             var_InheritBool( p_vlccontext->p_demux, CFG_PREFIX "encrypt" );
 
     return true;
@@ -217,15 +235,28 @@ static bool postConnectHandler( freerdp *p_instance )
     vlcrdp_context_t * p_vlccontext = (vlcrdp_context_t *) p_instance->context;
 
     msg_Dbg( p_vlccontext->p_demux, "connected to desktop %dx%d (%d bpp)",
+#if defined(FREERDP_VERSION_MAJOR) && (FREERDP_VERSION_MAJOR > 1 || (FREERDP_VERSION_MAJOR == 1 && FREERDP_VERSION_MINOR >= 1))
+             p_instance->settings->DesktopWidth,
+             p_instance->settings->DesktopHeight,
+             p_instance->settings->ColorDepth
+#else
              p_instance->settings->width,
              p_instance->settings->height,
-             p_instance->settings->color_depth );
+             p_instance->settings->color_depth
+#endif
+             );
 
     p_instance->update->DesktopResize = desktopResizeHandler;
     p_instance->update->BeginPaint = beginPaintHandler;
     p_instance->update->EndPaint = endPaintHandler;
 
-    gdi_init( p_instance, CLRBUF_16BPP | CLRBUF_24BPP | CLRBUF_32BPP, NULL );
+    gdi_init( p_instance,
+                CLRBUF_16BPP |
+#if defined(FREERDP_VERSION_MAJOR) && defined(FREERDP_VERSION_MINOR) && \
+    !(FREERDP_VERSION_MAJOR > 1 || (FREERDP_VERSION_MAJOR == 1 && FREERDP_VERSION_MINOR >= 2))
+                CLRBUF_24BPP |
+#endif
+                CLRBUF_32BPP, NULL );
 
     desktopResizeHandler( p_instance->context );
     return true;
@@ -246,8 +277,8 @@ static bool authenticateHandler( freerdp *p_instance, char** ppsz_username,
  *****************************************************************************/
 static int Control( demux_t *p_demux, int i_query, va_list args )
 {
+    demux_sys_t *p_sys = p_demux->p_sys;
     bool *pb;
-    int64_t *pi64;
     double *p_dbl;
     vlc_meta_t *p_meta;
 
@@ -258,38 +289,35 @@ static int Control( demux_t *p_demux, int i_query, va_list args )
         case DEMUX_CAN_CONTROL_PACE:
         case DEMUX_CAN_CONTROL_RATE:
         case DEMUX_HAS_UNSUPPORTED_META:
-            pb = (bool*)va_arg( args, bool * );
+            pb = va_arg( args, bool * );
             *pb = false;
             return VLC_SUCCESS;
 
         case DEMUX_CAN_RECORD:
-            pb = (bool*)va_arg( args, bool * );
+            pb = va_arg( args, bool * );
             *pb = true;
             return VLC_SUCCESS;
 
         case DEMUX_GET_PTS_DELAY:
-            pi64 = (int64_t*)va_arg( args, int64_t * );
-            *pi64 = INT64_C(1000)
-                  * var_InheritInteger( p_demux, "live-caching" );
+            *va_arg( args, vlc_tick_t * ) =
+                VLC_TICK_FROM_MS(var_InheritInteger( p_demux, "live-caching" ));
             return VLC_SUCCESS;
 
         case DEMUX_GET_TIME:
-            pi64 = (int64_t*)va_arg( args, int64_t * );
-            *pi64 = mdate() - p_demux->p_sys->i_starttime;
+            *va_arg( args, vlc_tick_t * ) = vlc_tick_now() - p_sys->i_starttime;
             return VLC_SUCCESS;
 
         case DEMUX_GET_LENGTH:
-            pi64 = (int64_t*)va_arg( args, int64_t * );
-            *pi64 = 0;
+            *va_arg( args, vlc_tick_t * ) = 0;
             return VLC_SUCCESS;
 
         case DEMUX_GET_FPS:
-            p_dbl = (double*)va_arg( args, double * );
-            *p_dbl = p_demux->p_sys->f_fps;
+            p_dbl = va_arg( args, double * );
+            *p_dbl = p_sys->f_fps;
             return VLC_SUCCESS;
 
         case DEMUX_GET_META:
-            p_meta = (vlc_meta_t*)va_arg( args, vlc_meta_t* );
+            p_meta = va_arg( args, vlc_meta_t * );
             vlc_meta_Set( p_meta, vlc_meta_Title, p_demux->psz_location );
             return VLC_SUCCESS;
 
@@ -305,17 +333,17 @@ static void *DemuxThread( void *p_data )
 {
     demux_t *p_demux = (demux_t *) p_data;
     demux_sys_t *p_sys = p_demux->p_sys;
-    p_sys->i_starttime = mdate();
-    mtime_t i_next_frame_date = mdate() + p_sys->i_frame_interval;
+    p_sys->i_starttime = vlc_tick_now();
+    vlc_tick_t i_next_frame_date = vlc_tick_now() + p_sys->i_frame_interval;
     int i_ret;
 
     for(;;)
     {
         i_ret = 0;
-        p_sys->i_cancel_state = vlc_savecancel();
+        int cancel_state = vlc_savecancel();
         if ( freerdp_shall_disconnect( p_sys->p_instance ) )
         {
-            vlc_restorecancel( p_sys->i_cancel_state );
+            vlc_restorecancel( cancel_state );
             msg_Warn( p_demux, "RDP server closed session" );
             es_out_Del( p_demux->out, p_sys->es );
             p_sys->es = NULL;
@@ -336,13 +364,13 @@ static void *DemuxThread( void *p_data )
         if ( freerdp_get_fds( p_sys->p_instance, fds.pp_rfds, &fds.i_nbr,
                               fds.pp_wfds, &fds.i_nbw ) != true )
         {
-            vlc_restorecancel( p_sys->i_cancel_state );
+            vlc_restorecancel( cancel_state );
             msg_Err( p_demux, "cannot get FDS" );
         }
         else
         if ( (fds.i_nbr + fds.i_nbw) > 0 && p_sys->es )
         {
-            vlc_restorecancel( p_sys->i_cancel_state );
+            vlc_restorecancel( cancel_state );
             int i_count = 0;
 
             for( int i = 0; i < fds.i_nbr; i++ )
@@ -359,23 +387,23 @@ static void *DemuxThread( void *p_data )
             }
             i_ret = poll( fds.ufds, i_count, p_sys->i_frame_interval * 1000/2 );
         } else {
-            vlc_restorecancel( p_sys->i_cancel_state );
+            vlc_restorecancel( cancel_state );
         }
 
-        mwait( i_next_frame_date );
+        vlc_tick_wait( i_next_frame_date );
         i_next_frame_date += p_sys->i_frame_interval;
 
         if ( i_ret >= 0 )
         {
             /* Do the rendering */
-            p_sys->i_cancel_state = vlc_savecancel();
+            cancel_state = vlc_savecancel();
             freerdp_check_fds( p_sys->p_instance );
-            vlc_restorecancel( p_sys->i_cancel_state );
+            vlc_restorecancel( cancel_state );
             block_t *p_block = block_Duplicate( p_sys->p_block );
             if (likely( p_block && p_sys->p_block ))
             {
-                p_sys->p_block->i_dts = p_sys->p_block->i_pts = mdate() - p_sys->i_starttime;
-                es_out_Control( p_demux->out, ES_OUT_SET_PCR, p_sys->p_block->i_pts );
+                p_sys->p_block->i_dts = p_sys->p_block->i_pts = vlc_tick_now() - p_sys->i_starttime;
+                es_out_SetPCR( p_demux->out, p_sys->p_block->i_pts );
                 es_out_Send( p_demux->out, p_sys->es, p_sys->p_block );
                 p_sys->p_block = p_block;
             }
@@ -392,20 +420,24 @@ static int Open( vlc_object_t *p_this )
     demux_t      *p_demux = (demux_t*)p_this;
     demux_sys_t  *p_sys;
 
-    p_sys = calloc( 1, sizeof(demux_sys_t) );
+    if (p_demux->out == NULL)
+        return VLC_EGENERIC;
+
+    p_sys = vlc_obj_calloc( p_this, 1, sizeof(demux_sys_t) );
     if( !p_sys ) return VLC_ENOMEM;
 
     p_sys->f_fps = var_InheritFloat( p_demux, CFG_PREFIX "fps" );
     if ( p_sys->f_fps <= 0 ) p_sys->f_fps = 1.0;
-    p_sys->i_frame_interval = 1000000 / p_sys->f_fps;
+    p_sys->i_frame_interval = CLOCK_FREQ / p_sys->f_fps;
 
+#if FREERDP_VERSION_MAJOR == 1 && FREERDP_VERSION_MINOR < 2
     freerdp_channels_global_init();
+#endif
 
     p_sys->p_instance = freerdp_new();
     if ( !p_sys->p_instance )
     {
-        msg_Err( p_demux, "rdp instanciation error" );
-        free( p_sys );
+        msg_Err( p_demux, "rdp instantiation error" );
         return VLC_EGENERIC;
     }
 
@@ -415,7 +447,7 @@ static int Open( vlc_object_t *p_this )
     p_sys->p_instance->Authenticate = authenticateHandler;
 
     /* Set up context handlers and let it be allocated */
-    p_sys->p_instance->context_size = sizeof( vlcrdp_context_t );
+    p_sys->p_instance->ContextSize = sizeof( vlcrdp_context_t );
     freerdp_context_new( p_sys->p_instance );
 
     vlcrdp_context_t * p_vlccontext = (vlcrdp_context_t *) p_sys->p_instance->context;
@@ -423,7 +455,7 @@ static int Open( vlc_object_t *p_this )
 
     /* Parse uri params for pre-connect */
     vlc_url_t url;
-    vlc_UrlParse( &url, p_demux->psz_location, 0 );
+    vlc_UrlParse( &url, p_demux->psz_url );
 
     if ( !EMPTY_STR(url.psz_host) )
         p_sys->psz_hostname = strdup( url.psz_host );
@@ -455,7 +487,6 @@ static int Open( vlc_object_t *p_this )
 error:
     freerdp_free( p_sys->p_instance );
     free( p_sys->psz_hostname );
-    free( p_sys );
     return VLC_EGENERIC;
 }
 
@@ -475,11 +506,12 @@ static void Close( vlc_object_t *p_this )
 
     freerdp_disconnect( p_sys->p_instance );
     freerdp_free( p_sys->p_instance );
+#if FREERDP_VERSION_MAJOR == 1 && FREERDP_VERSION_MINOR < 2
     freerdp_channels_global_uninit();
+#endif
 
     if ( p_sys->p_block )
         block_Release( p_sys->p_block );
 
     free( p_sys->psz_hostname );
-    free( p_sys );
 }

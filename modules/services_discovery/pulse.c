@@ -36,7 +36,7 @@
 static int Open (vlc_object_t *);
 static void Close (vlc_object_t *);
 
-VLC_SD_PROBE_HELPER("pulse", "Audio capture", SD_CAT_DEVICES);
+VLC_SD_PROBE_HELPER("pulse", N_("Audio capture"), SD_CAT_DEVICES);
 
 vlc_module_begin ()
     set_shortname (N_("Audio capture"))
@@ -50,12 +50,12 @@ vlc_module_begin ()
     VLC_SD_PROBE_SUBMODULE
 vlc_module_end ()
 
-struct services_discovery_sys_t
+typedef struct
 {
     void                 *root;
     pa_context           *context;
     pa_threaded_mainloop *mainloop;
-};
+} services_discovery_sys_t;
 
 static void SourceCallback(pa_context *, const pa_source_info *, int, void *);
 static void ContextCallback(pa_context *, pa_subscription_event_type_t,
@@ -79,6 +79,7 @@ static int Open (vlc_object_t *obj)
     }
 
     sd->p_sys = sys;
+    sd->description = _("Audio capture");
     sys->context = ctx;
     sys->root = NULL;
 
@@ -120,7 +121,7 @@ static void DestroySource (void *data)
     struct device *d = data;
 
     services_discovery_RemoveItem (d->sd, d->item);
-    vlc_gc_decref (d->item);
+    input_item_Release (d->item);
     free (d);
 }
 
@@ -148,9 +149,7 @@ static int AddSource (services_discovery_t *sd, const pa_source_info *info)
     if (unlikely(asprintf (&mrl, "pulse://%s", info->name) == -1))
         return -1;
 
-    input_item_t *item = input_item_NewWithType (mrl, info->description,
-                                                 0, NULL, 0, -1,
-                                                 ITEM_TYPE_CARD);
+    input_item_t *item = input_item_NewCard (mrl, info->description);
     free (mrl);
     if (unlikely(item == NULL))
         return -1;
@@ -158,17 +157,17 @@ static int AddSource (services_discovery_t *sd, const pa_source_info *info)
     struct device *d = malloc (sizeof (*d));
     if (unlikely(d == NULL))
     {
-        vlc_gc_decref (item);
+        input_item_Release (item);
         return -1;
     }
     d->index = info->index;
     d->item = item;
 
-    struct device **dp = tsearch (d, &sys->root, cmpsrc);
+    void **dp = tsearch (d, &sys->root, cmpsrc);
     if (dp == NULL) /* Out-of-memory */
     {
         free (d);
-        vlc_gc_decref (item);
+        input_item_Release (item);
         return -1;
     }
     if (*dp != d) /* Update existing source */
@@ -177,13 +176,13 @@ static int AddSource (services_discovery_t *sd, const pa_source_info *info)
         d = *dp;
         input_item_SetURI (d->item, item->psz_uri);
         input_item_SetName (d->item, item->psz_name);
-        vlc_gc_decref (item);
+        input_item_Release (item);
         return 0;
     }
 
     const char *card = pa_proplist_gets(info->proplist, "device.product.name");
-    services_discovery_AddItem (sd, item,
-                                (card != NULL) ? card : N_("Generic"));
+    services_discovery_AddItemCat(sd, item,
+                                  (card != NULL) ? card : N_("Generic"));
     d->sd = sd;
     return 0;
 }
@@ -206,7 +205,7 @@ static void RemoveSource (services_discovery_t *sd, uint32_t idx)
 {
     services_discovery_sys_t *sys = sd->p_sys;
 
-    struct device **dp = tfind (&idx, &sys->root, cmpsrc);
+    void **dp = tfind (&idx, &sys->root, cmpsrc);
     if (dp == NULL)
         return;
 

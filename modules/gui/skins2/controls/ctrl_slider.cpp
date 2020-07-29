@@ -2,7 +2,6 @@
  * ctrl_slider.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -413,7 +412,7 @@ void CtrlSliderBg::draw( OSGraphics &rImage, int xDest, int yDest, int w, int h 
 
 void CtrlSliderBg::handleEvent( EvtGeneric &rEvent )
 {
-    if( rEvent.getAsString().find( "mouse:left:down" ) != string::npos )
+    if( rEvent.getAsString().find( "mouse:left:down" ) != std::string::npos )
     {
         // Compute the resize factors
         float factorX, factorY;
@@ -441,7 +440,7 @@ void CtrlSliderBg::handleEvent( EvtGeneric &rEvent )
             pWin->forwardEvent( evt, *m_pCursor );
         }
     }
-    else if( rEvent.getAsString().find( "scroll" ) != string::npos )
+    else if( rEvent.getAsString().find( "scroll" ) != std::string::npos )
     {
         int dir = static_cast<EvtScroll*>(&rEvent)->getDirection();
         m_rVariable.set( scroll( EvtScroll::kUp == dir,

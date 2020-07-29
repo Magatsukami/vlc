@@ -2,7 +2,6 @@
  * mkv.hpp : matroska demuxer
  *****************************************************************************
  * Copyright (C) 2003-2005, 2008 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir@via.ecp.fr>
  *          Steve Lhomme <steve.lhomme@free.fr>
@@ -22,19 +21,12 @@
  * Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
  *****************************************************************************/
 
-#ifndef _MKV_H_
-#define _MKV_H_
+#ifndef VLC_MKV_MKV_HPP_
+#define VLC_MKV_MKV_HPP_
 
 /*****************************************************************************
  * Preamble
  *****************************************************************************/
-
-
-/* config.h may include inttypes.h, so make sure we define that option
- * early enough. */
-#define __STDC_FORMAT_MACROS 1
-#define __STDC_CONSTANT_MACROS 1
-#define __STDC_LIMIT_MACROS 1
 
 #ifdef HAVE_CONFIG_H
 # include "config.h"
@@ -45,9 +37,7 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 
-#ifdef HAVE_TIME_H
-#   include <time.h>                                               /* time() */
-#endif
+#include <time.h>
 
 #include <vlc_meta.h>
 #include <vlc_charset.h>
@@ -61,6 +51,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <map>
+#include <stdexcept>
 
 /* libebml and matroska */
 #include "ebml/EbmlHead.h"
@@ -69,7 +61,6 @@
 #include "ebml/EbmlContexts.h"
 #include "ebml/EbmlVoid.h"
 #include "ebml/EbmlVersion.h"
-#include "ebml/StdIOCallback.h"
 
 #include "matroska/KaxAttachments.h"
 #include "matroska/KaxAttached.h"
@@ -87,7 +78,6 @@
 #include "matroska/KaxSegment.h"
 #include "matroska/KaxTag.h"
 #include "matroska/KaxTags.h"
-//#include "matroska/KaxTagMulti.h"
 #include "matroska/KaxTracks.h"
 #include "matroska/KaxTrackAudio.h"
 #include "matroska/KaxTrackVideo.h"
@@ -95,16 +85,17 @@
 #include "matroska/KaxContentEncoding.h"
 #include "matroska/KaxVersion.h"
 
-#include "ebml/StdIOCallback.h"
+#include "stream_io_callback.hpp"
 
-extern "C" {
-   #include "../mp4/libmp4.h"
-}
 #ifdef HAVE_ZLIB_H
 #   include <zlib.h>
 #endif
 
-#define MKV_DEBUG 0
+#ifndef NDEBUG
+//# define MKV_DEBUG 0
+#endif
+
+namespace mkv {
 
 #define MATROSKA_COMPRESSION_NONE  -1
 #define MATROSKA_COMPRESSION_ZLIB   0
@@ -121,22 +112,25 @@ enum
 
 #define MKVD_TIMECODESCALE 1000000
 
-#define MKV_IS_ID( el, C ) ( el != NULL && typeid( *el ) == typeid( C ) )
+#define MKV_IS_ID( el, C ) ( el != NULL && (el->operator const EbmlId&()) == (C::ClassInfos.ClassId()) )
+#define MKV_CHECKED_PTR_DECL( name, type, src ) type * name = MKV_IS_ID(src, type) ? static_cast<type*>(src) : NULL
+#define MKV_CHECKED_PTR_DECL_CONST( name, type, src ) const type * name = MKV_IS_ID(src, type) ? static_cast<const type*>(src) : NULL
 
 
 using namespace LIBMATROSKA_NAMESPACE;
-using namespace std;
 
 void BlockDecode( demux_t *p_demux, KaxBlock *block, KaxSimpleBlock *simpleblock,
-                         mtime_t i_pts, mtime_t i_duration, bool f_mandatory );
+                  KaxBlockAdditions *additions,
+                  vlc_tick_t i_pts, vlc_tick_t i_duration, bool b_key_picture,
+                  bool b_discardable_picture );
 
 class attachment_c
 {
 public:
-    attachment_c( const std::string& _psz_file_name, const std::string& _psz_mime_type, int _i_size )
+    attachment_c( const std::string& _str_file_name, const std::string& _str_mime_type, int _i_size )
         :i_size(_i_size)
-        ,psz_file_name( _psz_file_name)
-        ,psz_mime_type( _psz_mime_type)
+        ,str_file_name( _str_file_name)
+        ,str_mime_type( _str_mime_type)
     {
         p_data = NULL;
     }
@@ -149,29 +143,27 @@ public:
         return (p_data != NULL);
     }
 
-    const char* fileName() const { return psz_file_name.c_str(); }
-    const char* mimeType() const { return psz_mime_type.c_str(); }
+    const char* fileName() const { return str_file_name.c_str(); }
+    const char* mimeType() const { return str_mime_type.c_str(); }
     int         size() const    { return i_size; }
 
     void          *p_data;
 private:
     int            i_size;
-    std::string    psz_file_name;
-    std::string    psz_mime_type;
+    std::string    str_file_name;
+    std::string    str_mime_type;
 };
 
 class matroska_segment_c;
 struct matroska_stream_c
 {
-    matroska_stream_c() :p_io_callback(NULL) ,p_estream(NULL) {}
-    ~matroska_stream_c()
-    {
-        delete p_io_callback;
-        delete p_estream;
-    }
+    matroska_stream_c(stream_t *s, bool owner);
+    ~matroska_stream_c() {}
 
-    IOCallback         *p_io_callback;
-    EbmlStream         *p_estream;
+    bool isUsed() const;
+
+    vlc_stream_io_callback io_callback;
+    EbmlStream         estream;
 
     std::vector<matroska_segment_c*> segments;
 };
@@ -187,75 +179,61 @@ public:
     virtual int32_t Init() { return 0; }
 };
 
-struct mkv_track_t
+class mkv_track_t
 {
-    bool         b_default;
-    bool         b_enabled;
-    bool         b_forced;
-    unsigned int i_number;
+    public:
+        mkv_track_t(enum es_format_category_e es_cat);
+        ~mkv_track_t();
 
-    unsigned int i_extra_data;
-    uint8_t      *p_extra_data;
+        typedef unsigned int track_id_t;
 
-    char         *psz_codec;
-    bool         b_dts_only;
-    bool         b_pts_only;
+        bool         b_default;
+        bool         b_enabled;
+        bool         b_forced;
+        track_id_t   i_number;
 
-    bool         b_no_duration;
-    uint64_t     i_default_duration;
-    float        f_timecodescale;
-    mtime_t      i_last_dts;
+        unsigned int i_extra_data;
+        uint8_t      *p_extra_data;
 
-    /* video */
-    es_format_t fmt;
-    float       f_fps;
-    es_out_id_t *p_es;
+        std::string  codec;
+        bool         b_dts_only;
+        bool         b_pts_only;
 
-    /* audio */
-    unsigned int i_original_rate;
-    uint8_t i_chans_to_reorder;            /* do we need channel reordering */
-    uint8_t pi_chan_table[AOUT_CHAN_MAX];
+        bool         b_no_duration;
+        vlc_tick_t   i_default_duration;
+        float        f_timecodescale;
+        vlc_tick_t   i_last_dts;
+        uint64_t     i_skip_until_fpos; /*< any block before this fpos should be ignored */
+
+        /* video */
+        es_format_t fmt;
+        float       f_fps;
+        es_out_id_t *p_es;
+
+        /* audio */
+        unsigned int i_original_rate;
+        uint8_t i_chans_to_reorder;            /* do we need channel reordering */
+        uint8_t pi_chan_table[AOUT_CHAN_MAX];
 
 
-    /* Private track paramters */
-    PrivateTrackData *p_sys;
+        /* Private track paramters */
+        PrivateTrackData *p_sys;
 
-    bool            b_inited;
-    /* data to be send first */
-    int             i_data_init;
-    uint8_t         *p_data_init;
+        bool            b_discontinuity;
 
-    /* hack : it's for seek */
-    bool            b_search_keyframe;
-    bool            b_silent;
+        /* informative */
+        std::string str_codec_name;
 
-    /* informative */
-    const char   *psz_codec_name;
-    const char   *psz_codec_settings;
-    const char   *psz_codec_info_url;
-    const char   *psz_codec_download_url;
+        /* encryption/compression */
+        int                    i_compression_type;
+        uint32_t               i_encoding_scope;
+        KaxContentCompSettings *p_compression_data;
 
-    /* encryption/compression */
-    int                    i_compression_type;
-    uint32_t               i_encoding_scope;
-    KaxContentCompSettings *p_compression_data;
-
-    /* Matroska 4 new elements used by Opus */
-    mtime_t i_seek_preroll;
-    mtime_t i_codec_delay;
-
+        /* Matroska 4 new elements used by Opus */
+        vlc_tick_t i_seek_preroll;
+        vlc_tick_t i_codec_delay;
 };
 
-struct mkv_index_t
-{
-    int     i_track;
-    int     i_block_number;
-
-    int64_t i_position;
-    int64_t i_time;
-
-    bool       b_key;
-};
-
+} // namespace
 
 #endif /* _MKV_HPP_ */

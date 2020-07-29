@@ -3,11 +3,10 @@
  *****************************************************************************
  * Copyright (C) 2006 VLC authors and VideoLAN
  * Copyright (C) 2008-2009 Rémi Denis-Courmont
- * $Id$
  *
  * Authors: Antoine Cellerier <dionoea at videolan dot org>
  *          Daniel Stranger <vlc at schmaller dot de>
- *          Rémi Denis-Courmont <rem # videolan org>
+ *          Rémi Denis-Courmont
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU Lesser General Public License as published by
@@ -34,18 +33,24 @@
 #include <vlc_common.h>
 #include <assert.h>
 
-/* Needed by str_format_time */
+/* Needed by vlc_strftime */
 #include <time.h>
 #include <limits.h>
 #include <math.h>
+#include <string.h>
+#ifndef HAVE_STRCOLL
+# define strcoll strcasecmp
+#endif
 
-/* Needed by str_format_meta */
-#include <vlc_input.h>
+/* Needed by vlc_strfplayer */
 #include <vlc_meta.h>
 #include <vlc_aout.h>
+#include <vlc_memstream.h>
 
 #include <vlc_strings.h>
 #include <vlc_charset.h>
+#include <vlc_arrays.h>
+#include <vlc_player.h>
 #include <libvlc.h>
 #include <errno.h>
 
@@ -189,11 +194,7 @@ static int cmp_entity (const void *key, const void *elem)
     return strncmp (name, ent->psz_entity, strlen (ent->psz_entity));
 }
 
-/**
- * Converts "&lt;", "&gt;" and "&amp;" to "<", ">" and "&"
- * \param string to convert
- */
-void resolve_xml_special_chars( char *psz_value )
+void vlc_xml_decode( char *psz_value )
 {
     char *p_pos = psz_value;
 
@@ -202,14 +203,20 @@ void resolve_xml_special_chars( char *psz_value )
         if( *psz_value == '&' )
         {
             if( psz_value[1] == '#' )
-            {   /* &#xxx; Unicode code point */
+            {   /* &#DDD; or &#xHHHH; Unicode code point */
                 char *psz_end;
-                unsigned long cp = strtoul( psz_value+2, &psz_end, 10 );
+                unsigned long cp;
+
+                if( psz_value[2] == 'x' ) /* The x must be lower-case. */
+                    cp = strtoul( psz_value + 3, &psz_end, 16 );
+                else
+                    cp = strtoul( psz_value + 2, &psz_end, 10 );
+
                 if( *psz_end == ';' )
                 {
                     psz_value = psz_end + 1;
                     if( cp == 0 )
-                        (void)0; /* skip nuls */
+                        (void)0; /* skip nulls */
                     else
                     if( cp <= 0x7F )
                     {
@@ -251,7 +258,7 @@ void resolve_xml_special_chars( char *psz_value )
                 const struct xml_entity_s *ent;
 
                 ent = bsearch (psz_value + 1, xml_entities,
-                               sizeof (xml_entities) / sizeof (*ent),
+                               ARRAY_SIZE (xml_entities),
                                sizeof (*ent), cmp_entity);
                 if (ent != NULL)
                 {
@@ -279,113 +286,137 @@ void resolve_xml_special_chars( char *psz_value )
     *p_pos = '\0';
 }
 
-/**
- * XML-encode an UTF-8 string
- * \param str nul-terminated UTF-8 byte sequence to XML-encode
- * \return XML encoded string or NULL on error
- * (errno is set to ENOMEM or EILSEQ as appropriate)
- */
-char *convert_xml_special_chars (const char *str)
+char *vlc_xml_encode (const char *str)
 {
-    assert (str != NULL);
-
-    const size_t len = strlen (str);
-    char *const buf = malloc (6 * len + 1), *ptr = buf;
-    if (unlikely(buf == NULL))
-        return NULL;
-
+    struct vlc_memstream stream;
     size_t n;
     uint32_t cp;
+
+    assert(str != NULL);
+    vlc_memstream_open(&stream);
 
     while ((n = vlc_towc (str, &cp)) != 0)
     {
         if (unlikely(n == (size_t)-1))
         {
-            free (buf);
+            if (vlc_memstream_close(&stream) == 0)
+                free(stream.ptr);
             errno = EILSEQ;
             return NULL;
         }
 
-        if ((cp & ~0x0080) < 32 /* C0/C1 control codes */
-         && memchr ("\x09\x0A\x0D\x85", cp, 4) == NULL)
-            ptr += sprintf (ptr, "&#%"PRIu32";", cp);
-        else
         switch (cp)
         {
-            case '\"': strcpy (ptr, "&quot;"); ptr += 6; break;
-            case '&':  strcpy (ptr, "&amp;");  ptr += 5; break;
-            case '\'': strcpy (ptr, "&#39;");  ptr += 5; break;
-            case '<':  strcpy (ptr, "&lt;");   ptr += 4; break;
-            case '>':  strcpy (ptr, "&gt;");   ptr += 4; break;
-            default:   memcpy (ptr, str, n);   ptr += n; break;
+            case '\"':
+                vlc_memstream_puts(&stream, "&quot;");
+                break;
+            case '&':
+                vlc_memstream_puts(&stream, "&amp;");
+                break;
+            case '\'':
+                vlc_memstream_puts(&stream, "&#39;");
+                break;
+            case '<':
+                vlc_memstream_puts(&stream, "&lt;");
+                break;
+            case '>':
+                vlc_memstream_puts(&stream, "&gt;");
+                break;
+            default:
+                if (cp < 32) /* C0 code not allowed (except 9, 10 and 13) */
+                    break;
+                if (cp >= 128 && cp < 160) /* C1 code encoded (except 133) */
+                {
+                    vlc_memstream_printf(&stream, "&#%"PRIu32";", cp);
+                    break;
+                }
+                /* fall through */
+            case 9:
+            case 10:
+            case 13:
+            case 133:
+                vlc_memstream_write(&stream, str, n);
+                break;
         }
         str += n;
     }
-    *(ptr++) = '\0';
 
-    ptr = realloc (buf, ptr - buf);
-    return likely(ptr != NULL) ? ptr : buf; /* cannot fail */
+    if (vlc_memstream_close(&stream))
+        return NULL;
+    return stream.ptr;
+}
+
+/* Hex encoding */
+void vlc_hex_encode_binary(const void *input, size_t size, char *output)
+{
+    const unsigned char *buffer = input;
+
+    for (size_t i = 0; i < size; i++) {
+        sprintf(&output[i * 2], "%02hhx", buffer[i]);
+    }
 }
 
 /* Base64 encoding */
-char *vlc_b64_encode_binary( const uint8_t *src, size_t i_src )
+char *vlc_b64_encode_binary(const void *src, size_t length)
 {
     static const char b64[] =
-           "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const unsigned char *in = src;
+    char *dst = malloc((((length + 2) / 3) * 4) + 1);
+    char *out = dst;
 
-    char *ret = malloc( ( i_src + 4 ) * 4 / 3 );
-    char *dst = ret;
-
-    if( dst == NULL )
+    if (unlikely(dst == NULL))
         return NULL;
 
-    while( i_src > 0 )
-    {
-        /* pops (up to) 3 bytes of input, push 4 bytes */
-        uint32_t v;
+    while (length >= 3) { /* pops (up to) 3 bytes of input, push 4 bytes */
+        uint_fast32_t v = (in[0] << 16) | (in[1] << 8) | in[2];
 
-        /* 1/3 -> 1/4 */
-        v = *src++ << 24;
-        *dst++ = b64[v >> 26];
-        v = v << 6;
-
-        /* 2/3 -> 2/4 */
-        if( i_src >= 2 )
-            v |= *src++ << 22;
-        *dst++ = b64[v >> 26];
-        v = v << 6;
-
-        /* 3/3 -> 3/4 */
-        if( i_src >= 3 )
-            v |= *src++ << 20; // 3/3
-        *dst++ = ( i_src >= 2 ) ? b64[v >> 26] : '='; // 3/4
-        v = v << 6;
-
-        /* -> 4/4 */
-        *dst++ = ( i_src >= 3 ) ? b64[v >> 26] : '='; // 4/4
-
-        if( i_src <= 3 )
-            break;
-        i_src -= 3;
+        *(out++) = b64[(v >> 18)];
+        *(out++) = b64[(v >> 12) & 0x3f];
+        *(out++) = b64[(v >>  6) & 0x3f];
+        *(out++) = b64[(v >>  0) & 0x3f];
+        in += 3;
+        length -= 3;
     }
 
-    *dst = '\0';
+    switch (length) {
+        case 2: {
+            uint_fast16_t v = (in[0] << 8) | in[1];
 
-    return ret;
+            *(out++) = b64[(v >> 10)];
+            *(out++) = b64[(v >>  4) & 0x3f];
+            *(out++) = b64[(v <<  2) & 0x3f];
+            *(out++) = '=';
+            break;
+        }
+
+        case 1: {
+            uint_fast8_t v = in[0];
+
+            *(out++) = b64[(v >>  2)];
+            *(out++) = b64[(v <<  4) & 0x3f];
+            *(out++) = '=';
+            *(out++) = '=';
+            break;
+        }
+    }
+
+    *out = '\0';
+    return dst;
 }
 
-char *vlc_b64_encode( const char *src )
+char *vlc_b64_encode(const char *src)
 {
-    if( src )
-        return vlc_b64_encode_binary( (const uint8_t*)src, strlen(src) );
-    else
-        return vlc_b64_encode_binary( (const uint8_t*)"", 0 );
+    if (src == NULL)
+        src = "";
+    return vlc_b64_encode_binary(src, strlen(src));
 }
 
 /* Base64 decoding */
-size_t vlc_b64_decode_binary_to_buffer( uint8_t *p_dst, size_t i_dst, const char *p_src )
+size_t vlc_b64_decode_binary_to_buffer(void *dst, size_t size,
+                                       const char *restrict src)
 {
-    static const int b64[256] = {
+    static const signed char b64[256] = {
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 00-0F */
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* 10-1F */
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,  /* 20-2F */
@@ -401,42 +432,32 @@ size_t vlc_b64_decode_binary_to_buffer( uint8_t *p_dst, size_t i_dst, const char
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* C0-CF */
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* D0-DF */
         -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* E0-EF */
-        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1   /* F0-FF */
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,  /* F0-FF */
     };
-    uint8_t *p_start = p_dst;
-    uint8_t *p = (uint8_t *)p_src;
+    const unsigned char *in = (const unsigned char *)src;
+    unsigned char *out = dst;
+    signed char prev;
+    int shift = 0;
 
-    int i_level;
-    int i_last;
+    static_assert (CHAR_BIT == 8, "Oops");
 
-    for( i_level = 0, i_last = 0; (size_t)( p_dst - p_start ) < i_dst && *p != '\0'; p++ )
-    {
-        const int c = b64[(unsigned int)*p];
-        if( c == -1 )
+    while (size > 0) {
+        const signed char cur = b64[*(in++)];
+        if (cur < 0)
             break;
 
-        switch( i_level )
-        {
-            case 0:
-                i_level++;
-                break;
-            case 1:
-                *p_dst++ = ( i_last << 2 ) | ( ( c >> 4)&0x03 );
-                i_level++;
-                break;
-            case 2:
-                *p_dst++ = ( ( i_last << 4 )&0xf0 ) | ( ( c >> 2 )&0x0f );
-                i_level++;
-                break;
-            case 3:
-                *p_dst++ = ( ( i_last &0x03 ) << 6 ) | c;
-                i_level = 0;
+        if (shift != 0) {
+            *(out++) = (prev << shift) | (cur >> (6 - shift));
+            size--;
         }
-        i_last = c;
+
+        prev = cur;
+        shift = (shift + 2) & 7;
     }
 
-    return p_dst - p_start;
+    return out - (unsigned char *)dst;
 }
+
 size_t vlc_b64_decode_binary( uint8_t **pp_dst, const char *psz_src )
 {
     const int i_src = strlen( psz_src );
@@ -461,12 +482,7 @@ char *vlc_b64_decode( const char *psz_src )
     return p_dst;
 }
 
-/**
- * Formats current time into a heap-allocated string.
- * @param tformat time format (as with C strftime())
- * @return an allocated string (must be free()'d), or NULL on memory error.
- */
-char *str_format_time( const char *tformat )
+char *vlc_strftime( const char *tformat )
 {
     time_t curtime;
     struct tm loctime;
@@ -493,325 +509,408 @@ char *str_format_time( const char *tformat )
         }
         free (str);
     }
-    assert (0);
+    vlc_assert_unreachable ();
 }
 
-static void format_duration (char *buf, size_t len, int64_t duration)
+static void write_duration(struct vlc_memstream *stream, vlc_tick_t duration)
 {
     lldiv_t d;
-    int sec;
+    long long sec;
 
     duration /= CLOCK_FREQ;
-    d = lldiv (duration, 60);
+    d = lldiv(duration, 60);
     sec = d.rem;
-    d = lldiv (d.quot, 60);
-    snprintf (buf, len, "%02lld:%02d:%02d", d.quot, (int)d.rem, sec);
+    d = lldiv(d.quot, 60);
+    vlc_memstream_printf(stream, "%02lld:%02lld:%02lld", d.quot, d.rem, sec);
 }
 
-#define INSERT_STRING( string )                                     \
-                    if( string != NULL )                            \
-                    {                                               \
-                        size_t len = strlen( string );              \
-                        dst = xrealloc( dst, i_size = i_size + len );\
-                        memcpy( (dst+d), string, len );             \
-                        d += len;                                   \
-                        free( string );                             \
-                    }
-
-/* same than INSERT_STRING, except that string won't be freed */
-#define INSERT_STRING_NO_FREE( string )                             \
-                    {                                               \
-                        size_t len = strlen( string );              \
-                        dst = xrealloc( dst, i_size = i_size + len );\
-                        memcpy( dst+d, string, len );               \
-                        d += len;                                   \
-                    }
-char *str_format_meta( input_thread_t *p_input, const char *s )
+static int write_meta(struct vlc_memstream *stream, input_item_t *item,
+                      vlc_meta_type_t type)
 {
-    char *dst = strdup( s );
-    if( unlikely(dst == NULL) )
-        return NULL;
+    if (item == NULL)
+        return EOF;
 
-    input_item_t *p_item = p_input ? input_GetItem(p_input) : NULL;
-    size_t i_size = strlen( s ) + 1; /* +1 to store '\0' */
-    size_t d = 0;
+    char *value = input_item_GetMeta(item, type);
+    if (value == NULL)
+        return EOF;
 
+    vlc_memstream_puts(stream, value);
+    free(value);
+    return 0;
+}
+
+char *vlc_strfplayer(vlc_player_t *player, input_item_t *item, const char *s)
+{
+    struct vlc_memstream stream[1];
+
+    char c;
     bool b_is_format = false;
     bool b_empty_if_na = false;
-    char buf[10];
 
-    while( *s )
+    assert(s != NULL);
+
+    if (!item && player)
+        item = vlc_player_GetCurrentMedia(player);
+
+    vlc_memstream_open(stream);
+
+    while ((c = *s) != '\0')
     {
-        if( b_is_format )
+        s++;
+
+        if (!b_is_format)
         {
-            switch( *s )
+            if (c == '$')
             {
-                case 'a':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetArtist( p_item ) );
+                b_is_format = true;
+                b_empty_if_na = false;
+                continue;
+            }
+
+            vlc_memstream_putc(stream, c);
+            continue;
+        }
+
+        b_is_format = false;
+
+        switch (c)
+        {
+            case 'a':
+                write_meta(stream, item, vlc_meta_Artist);
+                break;
+            case 'b':
+                write_meta(stream, item, vlc_meta_Album);
+                break;
+            case 'c':
+                write_meta(stream, item, vlc_meta_Copyright);
+                break;
+            case 'd':
+                write_meta(stream, item, vlc_meta_Description);
+                break;
+            case 'e':
+                write_meta(stream, item, vlc_meta_EncodedBy);
+                break;
+            case 'f':
+                if (item != NULL)
+                {
+                    vlc_mutex_lock(&item->lock);
+                    if (item->p_stats != NULL)
+                        vlc_memstream_printf(stream, "%"PRIi64,
+                            item->p_stats->i_displayed_pictures);
+                    else if (!b_empty_if_na)
+                        vlc_memstream_putc(stream, '-');
+                    vlc_mutex_unlock(&item->lock);
+                }
+                else if (!b_empty_if_na)
+                    vlc_memstream_putc(stream, '-');
+                break;
+            case 'g':
+                write_meta(stream, item, vlc_meta_Genre);
+                break;
+            case 'l':
+                write_meta(stream, item, vlc_meta_Language);
+                break;
+            case 'n':
+                write_meta(stream, item, vlc_meta_TrackNumber);
+                break;
+            case 'o':
+                write_meta(stream, item, vlc_meta_TrackTotal);
+                break;
+            case 'p':
+                if (item == NULL)
                     break;
-                case 'b':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetAlbum( p_item ) );
-                    break;
-                case 'c':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetCopyright( p_item ) );
-                    break;
-                case 'd':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetDescription( p_item ) );
-                    break;
-                case 'e':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetEncodedBy( p_item ) );
-                    break;
-                case 'f':
-                    if( p_item && p_item->p_stats )
+                {
+                    char *value = input_item_GetNowPlayingFb(item);
+                    if (value == NULL)
+                        break;
+
+                    vlc_memstream_puts(stream, value);
+                    free(value);
+                }
+                break;
+            case 'r':
+                write_meta(stream, item, vlc_meta_Rating);
+                break;
+            case 's':
+            {
+                char *lang = NULL;
+
+                if (player != NULL)
+                    lang = vlc_player_GetCategoryLanguage(player, SPU_ES);
+                if (lang != NULL)
+                {
+                    vlc_memstream_puts(stream, lang);
+                    free(lang);
+                }
+                else if (!b_empty_if_na)
+                    vlc_memstream_putc(stream, '-');
+                break;
+            }
+            case 't':
+                write_meta(stream, item, vlc_meta_Title);
+                break;
+            case 'u':
+                write_meta(stream, item, vlc_meta_URL);
+                break;
+            case 'A':
+                write_meta(stream, item, vlc_meta_Date);
+                break;
+            case 'B':
+            {
+                if (player)
+                {
+                    const struct vlc_player_track *track =
+                        vlc_player_GetSelectedTrack(player, AUDIO_ES);
+                    if (track)
                     {
-                        vlc_mutex_lock( &p_item->p_stats->lock );
-                        snprintf( buf, 10, "%"PRIi64,
-                                  p_item->p_stats->i_displayed_pictures );
-                        vlc_mutex_unlock( &p_item->p_stats->lock );
-                    }
-                    else
-                        strcpy( buf, b_empty_if_na ? "" : "-" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'g':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetGenre( p_item ) );
-                    break;
-                case 'l':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetLanguage( p_item ) );
-                    break;
-                case 'n':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetTrackNum( p_item ) );
-                    break;
-                case 'p':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetNowPlaying( p_item ) );
-                    break;
-                case 'r':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetRating( p_item ) );
-                    break;
-                case 's':
-                    {
-                        char *psz_lang = NULL;
-                        if( p_input )
-                            psz_lang = var_GetNonEmptyString( p_input, "sub-language" );
-                        if( psz_lang == NULL )
-                            psz_lang = strdup( b_empty_if_na ? "" : "-" );
-                        INSERT_STRING( psz_lang );
+                        vlc_memstream_printf(stream, "%u",
+                                             track->fmt.i_bitrate);
                         break;
                     }
-                case 't':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetTitle( p_item ) );
-                    break;
-                case 'u':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetURL( p_item ) );
-                    break;
-                case 'A':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetDate( p_item ) );
-                    break;
-                case 'B':
-                    if( p_input )
-                        snprintf( buf, 10, "%"PRId64,
-                                  var_GetInteger( p_input, "bit-rate" )/1000 );
-                    else
-                        strcpy( buf, b_empty_if_na ? "" : "-" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'C':
-                    if( p_input )
-                        snprintf( buf, 10, "%"PRId64,
-                                  var_GetInteger( p_input, "chapter" ) );
-                    else
-                        strcpy( buf, b_empty_if_na ? "" : "-" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'D':
-                    if( p_item )
-                    {
-                        mtime_t i_duration = input_item_GetDuration( p_item );
-                        format_duration (buf, sizeof (buf), i_duration);
-                    }
-                    else
-                        strcpy( buf, b_empty_if_na ? "" : "--:--:--" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'F':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetURI( p_item ) );
-                    break;
-                case 'I':
-                    if( p_input )
-                        snprintf( buf, 10, "%"PRId64,
-                                  var_GetInteger( p_input, "title" ) );
-                    else
-                        strcpy( buf, b_empty_if_na ? "" : "-" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'L':
-                    if( p_item && p_input )
-                    {
-                        mtime_t i_duration = input_item_GetDuration( p_item );
-                        int64_t i_time = var_GetTime( p_input, "time" );
-                        format_duration( buf, sizeof(buf),
-                                         i_duration - i_time );
-                    }
-                    else
-                        strcpy( buf, b_empty_if_na ? "" : "--:--:--" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'N':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetName( p_item ) );
-                    break;
-                case 'O':
-                {
-                    char *lang = NULL;
-                    if( p_input )
-                        lang = var_GetNonEmptyString( p_input,
-                                                      "audio-language" );
-                    if( lang == NULL )
-                        lang = strdup( b_empty_if_na ? "" : "-" );
-                    INSERT_STRING( lang );
-                    break;
                 }
-                case 'P':
-                    if( p_input )
-                        snprintf( buf, 10, "%2.1lf",
-                                  var_GetFloat( p_input, "position" ) * 100. );
-                    else
-                        snprintf( buf, 10, b_empty_if_na ? "" : "--.-%%" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'R':
-                    if( p_input )
-                    {
-                        float f = var_GetFloat( p_input, "rate" );
-                        snprintf( buf, 10, "%.3f", f );
-                    }
-                    else
-                        strcpy( buf, b_empty_if_na ? "" : "-" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'S':
-                    if( p_input )
-                    {
-                        int r = var_GetInteger( p_input, "sample-rate" );
-                        snprintf( buf, 10, "%d.%d", r/1000, (r/100)%10 );
-                    }
-                    else
-                        strcpy( buf, b_empty_if_na ? "" : "-" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'T':
-                    if( p_input )
-                    {
-                        int64_t i_time = var_GetTime( p_input, "time" );
-                        format_duration( buf, sizeof(buf), i_time );
-                    }
-                    else
-                        strcpy( buf, b_empty_if_na ? "" : "--:--:--" );
-                    INSERT_STRING_NO_FREE( buf );
-                    break;
-                case 'U':
-                    if( p_item )
-                        INSERT_STRING( input_item_GetPublisher( p_item ) );
-                    break;
-                case 'V':
-                {
-                    float vol = 0.f;
-
-                    if( p_input )
-                    {
-                        audio_output_t *aout = input_GetAout( p_input );
-                        if( aout )
-                        {
-                            vol = aout_VolumeGet( aout );
-                            vlc_object_release( aout );
-                        }
-                    }
-                    if( vol >= 0.f )
-                    {
-                        snprintf( buf, 10, "%ld", lroundf(vol * 256.f) );
-                        INSERT_STRING_NO_FREE( buf );
-                    }
-                    else
-                         INSERT_STRING_NO_FREE( "---" );
-                    break;
-                }
-                case '_':
-                    *(dst+d) = '\n';
-                    d++;
-                    break;
-                case 'Z':
-                    if( p_item )
-                    {
-                        char *psz_now_playing = input_item_GetNowPlaying( p_item );
-                        if( EMPTY_STR( psz_now_playing ) )
-                        {
-                            char *psz_temp = input_item_GetTitleFbName( p_item );
-                            char *psz_artist = input_item_GetArtist( p_item );
-                            if( !EMPTY_STR( psz_artist ) )
-                            {
-                                INSERT_STRING( psz_artist );
-                                if ( !EMPTY_STR( psz_temp ) )
-                                    INSERT_STRING_NO_FREE( " - " );
-                            }
-                            INSERT_STRING( psz_temp );
-                        }
-                        else
-                            INSERT_STRING( psz_now_playing );
-                    }
-                    break;
-
-                case ' ':
-                    b_empty_if_na = true;
-                    break;
-
-                default:
-                    *(dst+d) = *s;
-                    d++;
-                    break;
+                if (!b_empty_if_na)
+                    vlc_memstream_putc(stream, '-');
+                break;
             }
-            if( *s != ' ' )
-                b_is_format = false;
-        }
-        else if( *s == '$' )
-        {
-            b_is_format = true;
-            b_empty_if_na = false;
-        }
-        else
-        {
-            *(dst+d) = *s;
-            d++;
-        }
-        s++;
-    }
-    *(dst+d) = '\0';
+            case 'C':
+                if (player)
+                {
+                    ssize_t chapter = vlc_player_GetSelectedChapterIdx(player);
+                    if (chapter != -1)
+                    {
+                        vlc_memstream_printf(stream, "%zd", chapter);
+                        break;
+                    }
+                }
+                if (!b_empty_if_na)
+                    vlc_memstream_putc(stream, '-');
+                break;
+            case 'D':
+                if (item != NULL)
+                    write_duration(stream, input_item_GetDuration(item));
+                else if (!b_empty_if_na)
+                    vlc_memstream_puts(stream, "--:--:--");
+                break;
+            case 'F':
+                if (item != NULL)
+                {
+                    char *uri = input_item_GetURI(item);
+                    if (uri != NULL)
+                    {
+                        vlc_memstream_puts(stream, uri);
+                        free(uri);
+                    }
+                }
+                break;
+            case 'I':
+                if (player)
+                {
+                    ssize_t title = vlc_player_GetSelectedTitleIdx(player);
+                    if (title != -1)
+                    {
+                        vlc_memstream_printf(stream, "%zd", title);
+                        break;
+                    }
+                }
+                if (!b_empty_if_na)
+                    vlc_memstream_putc(stream, '-');
+                break;
+            case 'L':
+                if (player)
+                {
+                    vlc_tick_t length = vlc_player_GetLength(player);
+                    vlc_tick_t time = vlc_player_GetTime(player);
+                    if (length != VLC_TICK_INVALID && time != VLC_TICK_INVALID)
+                        write_duration(stream, length - time);
+                }
+                if (!b_empty_if_na)
+                    vlc_memstream_puts(stream, "--:--:--");
+                break;
+            case 'N':
+                if (item != NULL)
+                {
+                    char *name = input_item_GetName(item);
+                    if (name != NULL)
+                    {
+                        vlc_memstream_puts(stream, name);
+                        free(name);
+                    }
+                }
+                break;
+            case 'O':
+            {
+                char *lang = NULL;
 
-    return dst;
+                if (player != NULL)
+                    lang = vlc_player_GetCategoryLanguage(player, AUDIO_ES);
+                if (lang != NULL)
+                {
+                    vlc_memstream_puts(stream, lang);
+                    free(lang);
+                }
+                else if (!b_empty_if_na)
+                    vlc_memstream_putc(stream, '-');
+                break;
+            }
+            case 'P':
+                if (player)
+                {
+                    float pos = vlc_player_GetPosition(player);
+                    if (pos >= 0)
+                    {
+                        vlc_memstream_printf(stream, "%2.1f", pos);
+                        break;
+                    }
+                }
+                if (!b_empty_if_na)
+                    vlc_memstream_puts(stream, "--.-%");
+                break;
+            case 'R':
+                if (player)
+                    vlc_memstream_printf(stream, "%.3f",
+                                         vlc_player_GetRate(player));
+                else if (!b_empty_if_na)
+                    vlc_memstream_putc(stream, '-');
+                break;
+            case 'S':
+                if (player)
+                {
+                    const struct vlc_player_track *track =
+                        vlc_player_GetSelectedTrack(player, AUDIO_ES);
+                    if (track)
+                    {
+                        div_t dr = div((track->fmt.audio.i_rate + 50) / 100, 10);
+                        vlc_memstream_printf(stream, "%d.%01d", dr.quot, dr.rem);
+                        break;
+                    }
+                }
+                if (!b_empty_if_na)
+                    vlc_memstream_putc(stream, '-');
+                break;
+            case 'T':
+                if (player)
+                {
+                    vlc_tick_t time = vlc_player_GetTime(player);
+                    if (time != VLC_TICK_INVALID)
+                    {
+                        write_duration(stream, time);
+                        break;
+                    }
+                }
+                if (!b_empty_if_na)
+                    vlc_memstream_puts(stream, "--:--:--");
+                break;
+            case 'U':
+                write_meta(stream, item, vlc_meta_Publisher);
+                break;
+            case 'V':
+            {
+                float vol = 0.f;
+
+                if (player)
+                {
+                    audio_output_t *aout = vlc_player_aout_Hold(player);
+                    if (aout != NULL)
+                    {
+                        vol = aout_VolumeGet(aout);
+                        aout_Release(aout);
+                    }
+                }
+                if (vol >= 0.f)
+                    vlc_memstream_printf(stream, "%ld", lroundf(vol * 256.f));
+                else if (!b_empty_if_na)
+                    vlc_memstream_puts(stream, "---");
+                break;
+            }
+            case '_':
+                vlc_memstream_putc(stream, '\n');
+                break;
+            case 'Z':
+                if (item == NULL)
+                    break;
+                {
+                    char *value = input_item_GetNowPlayingFb(item);
+                    if (value != NULL)
+                    {
+                        vlc_memstream_puts(stream, value);
+                        free(value);
+                    }
+                    else
+                    {
+                        char *title = input_item_GetTitleFbName(item);
+
+                        if (write_meta(stream, item, vlc_meta_Artist) >= 0
+                            && title != NULL)
+                            vlc_memstream_puts(stream, " - ");
+
+                        if (title != NULL)
+                        {
+                            vlc_memstream_puts(stream, title);
+                            free(title);
+                        }
+                    }
+                }
+                break;
+            case ' ':
+                b_empty_if_na = true;
+                b_is_format = true;
+                break;
+            default:
+                vlc_memstream_putc(stream, c);
+                break;
+        }
+    }
+
+    if (vlc_memstream_close(stream))
+        return NULL;
+    return stream->ptr;
 }
-#undef INSERT_STRING
-#undef INSERT_STRING_NO_FREE
+
+int vlc_filenamecmp(const char *a, const char *b)
+{
+    size_t i;
+    char ca, cb;
+
+    /* Attempt to guess if the sorting algorithm should be alphabetic
+     * (i.e. collation) or numeric:
+     * - If the first mismatching characters are not both digits,
+     *   then collation is the only option.
+     * - If one of the first mismatching characters is 0 and the other is also
+     *   a digit, the comparands are probably left-padded numerical values.
+     *   It does not matter which algorithm is used: the zero will be smaller
+     *   than non-zero either way.
+     * - Otherwise, the comparands are numerical values, and might not be
+     *   aligned (i.e. not same order of magnitude). If so, collation would
+     *   fail. So numerical comparison is performed. */
+    for (i = 0; (ca = a[i]) == (cb = b[i]); i++)
+        if (ca == '\0')
+            return 0; /* strings are exactly identical */
+
+    if ((unsigned)(ca - '0') > 9 || (unsigned)(cb - '0') > 9)
+        return strcoll(a, b);
+
+    unsigned long long ua = strtoull(a + i, NULL, 10);
+    unsigned long long ub = strtoull(b + i, NULL, 10);
+
+    /* The number may be identical in two cases:
+     * - leading zero (e.g. "012" and "12")
+     * - overflow on both sides (#ULLONG_MAX) */
+    if (ua == ub)
+        return strcoll(a, b);
+
+    return (ua > ub) ? +1 : -1;
+}
 
 /**
+ * Sanitize a file name.
+ *
  * Remove forbidden, potentially forbidden and otherwise evil characters from
- * filenames. This includes slashes, and popular characters like colon
- * (on Unix anyway), so this should only be used for automatically generated
- * filenames.
- * \warning Do not use this on full paths,
- * only single file names without any directory separator!
+ * file names. That includes slashes, and popular characters like colon
+ * (on Unix anyway).
+ *
+ * \warning This function should only be used for automatically generated
+ * file names. Do not use this on full paths, only single file names without
+ * any directory separator!
  */
 void filename_sanitize( char *str )
 {
@@ -825,7 +924,7 @@ void filename_sanitize( char *str )
         return;
     }
 
-    /* On platforms not using UTF-7, VLC cannot access non-Unicode paths.
+    /* On platforms not using UTF-8, VLC cannot access non-Unicode paths.
      * Also, some file systems require Unicode file names.
      * NOTE: This may inserts '?' thus is done replacing '?' with '_'. */
     EnsureUTF8( str );
@@ -860,89 +959,4 @@ void filename_sanitize( char *str )
             break;
         *str = '_';
     }
-}
-
-/**
- * Remove forbidden characters from full paths (leaves slashes)
- */
-void path_sanitize( char *str )
-{
-#if defined( _WIN32 ) || defined( __OS2__ )
-    /* check drive prefix if path is absolute */
-    if( (((unsigned char)(str[0] - 'A') < 26)
-      || ((unsigned char)(str[0] - 'a') < 26)) && (':' == str[1]) )
-        str += 2;
-#endif
-    while( *str )
-    {
-#if defined( __APPLE__ )
-        if( *str == ':' )
-            *str = '_';
-#elif defined( _WIN32 ) || defined( __OS2__ )
-        if( strchr( "*\"?:|<>", *str ) )
-            *str = '_';
-        if( *str == '/' )
-            *str = DIR_SEP_CHAR;
-#endif
-        str++;
-    }
-}
-
-/*
-  Decodes a duration as defined by ISO 8601
-  http://en.wikipedia.org/wiki/ISO_8601#Durations
-  @param str A null-terminated string to convert
-  @return: The duration in seconds. -1 if an error occurred.
-
-  Exemple input string: "PT0H9M56.46S"
- */
-time_t str_duration( const char *psz_duration )
-{
-    bool        timeDesignatorReached = false;
-    time_t      res = 0;
-    char*       end_ptr;
-
-    if ( psz_duration == NULL )
-        return -1;
-    if ( ( *(psz_duration++) ) != 'P' )
-        return -1;
-    do
-    {
-        double number = strtod( psz_duration, &end_ptr );
-        double      mul = 0;
-        if ( psz_duration != end_ptr )
-            psz_duration = end_ptr;
-        switch( *psz_duration )
-        {
-            case 'M':
-            {
-                //M can mean month or minutes, if the 'T' flag has been reached.
-                //We don't handle months though.
-                if ( timeDesignatorReached == true )
-                    mul = 60.0;
-                break ;
-            }
-            case 'Y':
-            case 'W':
-                break ; //Don't handle this duration.
-            case 'D':
-                mul = 86400.0;
-                break ;
-            case 'T':
-                timeDesignatorReached = true;
-                break ;
-            case 'H':
-                mul = 3600.0;
-                break ;
-            case 'S':
-                mul = 1.0;
-                break ;
-            default:
-                break ;
-        }
-        res += (time_t)(mul * number);
-        if ( *psz_duration )
-            psz_duration++;
-    } while ( *psz_duration );
-    return res;
 }

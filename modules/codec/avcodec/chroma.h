@@ -2,7 +2,6 @@
  * chroma.h: decoder and encoder using libavcodec
  *****************************************************************************
  * Copyright (C) 2001-2008 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Laurent Aimar <fenrir@via.ecp.fr>
  *
@@ -23,8 +22,8 @@
 
 /* VLC <-> avutil tables */
 
-#ifndef _VLC_AVUTIL_CHROMA_H
-#define _VLC_AVUTIL_CHROMA_H 1
+#ifndef VLC_AVUTIL_CHROMA_H_
+#define VLC_AVUTIL_CHROMA_H_
 
 int FindFfmpegChroma( vlc_fourcc_t );
 int GetFfmpegChroma( int *i_ffmpeg_chroma, const video_format_t *fmt );

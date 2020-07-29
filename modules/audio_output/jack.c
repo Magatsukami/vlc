@@ -2,7 +2,6 @@
  * jack.c : JACK audio output module
  *****************************************************************************
  * Copyright (C) 2006 VLC authors and VideoLAN
- * $Id$
  *
  * Authors: Cyril Deguet <asmax _at_ videolan.org>
  *          Jon Griffiths <jon_p_griffiths _At_ yahoo _DOT_ com>
@@ -28,7 +27,6 @@
 /*****************************************************************************
  * Preamble
  *****************************************************************************/
-#include <unistd.h>                                      /* write(), close() */
 
 #ifdef HAVE_CONFIG_H
 # include "config.h"
@@ -41,6 +39,9 @@
 #include <jack/jack.h>
 #include <jack/ringbuffer.h>
 
+#include <stdio.h>
+#include <unistd.h>                                      /* write(), close() */
+
 typedef jack_default_audio_sample_t jack_sample_t;
 
 /*****************************************************************************
@@ -49,7 +50,7 @@ typedef jack_default_audio_sample_t jack_sample_t;
  * This structure is part of the audio output thread descriptor.
  * It describes some JACK specific variables.
  *****************************************************************************/
-struct aout_sys_t
+typedef struct
 {
     jack_ringbuffer_t *p_jack_ringbuffer;
     jack_client_t  *p_jack_client;
@@ -60,18 +61,18 @@ struct aout_sys_t
     jack_nframes_t latency;
     float soft_gain;
     bool soft_mute;
-    mtime_t paused; /**< Time when (last) paused */
-};
+    vlc_tick_t paused; /**< Time when (last) paused */
+} aout_sys_t;
 
 /*****************************************************************************
  * Local prototypes
  *****************************************************************************/
 static int  Open         ( vlc_object_t * );
 static void Close        ( vlc_object_t * );
-static void Play         ( audio_output_t * p_aout, block_t * p_block );
-static void Pause        ( audio_output_t *aout, bool paused, mtime_t date );
-static void Flush        ( audio_output_t *p_aout, bool wait );
-static int  TimeGet      ( audio_output_t *, mtime_t * );
+static void Play         ( audio_output_t * p_aout, block_t *, vlc_tick_t );
+static void Pause        ( audio_output_t *aout, bool paused, vlc_tick_t date );
+static void Flush        ( audio_output_t *p_aout );
+static int  TimeGet      ( audio_output_t *, vlc_tick_t * );
 static int  Process      ( jack_nframes_t i_frames, void *p_arg );
 static int  GraphChange  ( void *p_arg );
 
@@ -89,6 +90,8 @@ static int  GraphChange  ( void *p_arg );
     "If automatic connection is enabled, only JACK clients whose names " \
     "match this regular expression will be considered for connection." )
 
+#define JACK_NAME_TEXT N_( "JACK client name" )
+
 /*****************************************************************************
  * Module descriptor
  *****************************************************************************/
@@ -102,6 +105,8 @@ vlc_module_begin ()
               AUTO_CONNECT_LONGTEXT, false )
     add_string( CONNECT_REGEX_OPTION, "system", CONNECT_REGEX_TEXT,
                 CONNECT_REGEX_LONGTEXT, false )
+    add_string( "jack-name", "", JACK_NAME_TEXT, JACK_NAME_TEXT, false)
+
     add_sw_gain( )
     set_callbacks( Open, Close )
 vlc_module_end ()
@@ -109,18 +114,27 @@ vlc_module_end ()
 
 static int Start( audio_output_t *p_aout, audio_sample_format_t *restrict fmt )
 {
-    char psz_name[32];
-    struct aout_sys_t *p_sys = p_aout->sys;
+    char *psz_name;
+    aout_sys_t *p_sys = p_aout->sys;
     int status = VLC_SUCCESS;
     unsigned int i;
     int i_error;
 
+    if( aout_FormatNbChannels( fmt ) == 0 )
+        return VLC_EGENERIC;
+
     p_sys->latency = 0;
-    p_sys->paused = VLC_TS_INVALID;
+    p_sys->paused = VLC_TICK_INVALID;
 
     /* Connect to the JACK server */
-    snprintf( psz_name, sizeof(psz_name), "vlc_%d", getpid());
-    psz_name[sizeof(psz_name) - 1] = '\0';
+    psz_name = var_InheritString( p_aout, "jack-name" );
+    if( !psz_name || !*psz_name )
+    {
+        free( psz_name );
+        if( asprintf( &psz_name, "vlc_%d", getpid()) == -1 )
+            return VLC_ENOMEM;
+    }
+
     p_sys->p_jack_client = jack_client_open( psz_name,
                                              JackNullOption | JackNoStartServer,
                                              NULL );
@@ -165,8 +179,8 @@ static int Start( audio_output_t *p_aout, audio_sample_format_t *restrict fmt )
         goto error_out;
     }
 
-    const size_t buf_sz = AOUT_MAX_ADVANCE_TIME * fmt->i_rate *
-        fmt->i_bytes_per_frame / CLOCK_FREQ;
+    const size_t buf_sz =
+        samples_from_vlc_tick(AOUT_MAX_ADVANCE_TIME, fmt->i_rate * fmt->i_bytes_per_frame);
     p_sys->p_jack_ringbuffer = jack_ringbuffer_create( buf_sz );
 
     if( p_sys->p_jack_ringbuffer == NULL )
@@ -183,10 +197,13 @@ static int Start( audio_output_t *p_aout, audio_sample_format_t *restrict fmt )
     /* Create the output ports */
     for( i = 0; i < p_sys->i_channels; i++ )
     {
-        snprintf( psz_name, sizeof(psz_name), "out_%d", i + 1);
-        psz_name[sizeof(psz_name) - 1] = '\0';
-        p_sys->p_jack_ports[i] = jack_port_register( p_sys->p_jack_client,
-                psz_name, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0 );
+        char *psz_name_output;
+        if( asprintf( &psz_name_output, "%s_out_%d", psz_name, i + 1) != -1 )
+        {
+            p_sys->p_jack_ports[i] = jack_port_register( p_sys->p_jack_client,
+                    psz_name_output, JACK_DEFAULT_AUDIO_TYPE, JackPortIsOutput, 0 );
+            free( psz_name_output );
+        }
 
         if( p_sys->p_jack_ports[i] == NULL )
         {
@@ -244,10 +261,11 @@ static int Start( audio_output_t *p_aout, audio_sample_format_t *restrict fmt )
 
     msg_Dbg( p_aout, "JACK audio output initialized (%d channels, rate=%d)",
              p_sys->i_channels, fmt->i_rate );
+    fmt->channel_type = AUDIO_CHANNEL_TYPE_BITMAP;
 
 error_out:
     /* Clean up, if an error occurred */
-    if( status != VLC_SUCCESS && p_sys != NULL )
+    if( status != VLC_SUCCESS )
     {
         if( p_sys->p_jack_client )
         {
@@ -260,12 +278,13 @@ error_out:
         free( p_sys->p_jack_ports );
         free( p_sys->p_jack_buffers );
     }
+    free( psz_name );
     return status;
 }
 
-static void Play (audio_output_t * p_aout, block_t * p_block)
+static void Play(audio_output_t * p_aout, block_t * p_block, vlc_tick_t date)
 {
-    struct aout_sys_t *p_sys = p_aout->sys;
+    aout_sys_t *p_sys = p_aout->sys;
     jack_ringbuffer_t *rb = p_sys->p_jack_ringbuffer;
     const size_t bytes_per_frame = p_sys->i_channels * sizeof(jack_sample_t);
 
@@ -290,12 +309,13 @@ static void Play (audio_output_t * p_aout, block_t * p_block)
     }
 
     block_Release(p_block);
+    (void) date;
 }
 
 /**
  * Pause or unpause playback
  */
-static void Pause(audio_output_t *aout, bool paused, mtime_t date)
+static void Pause(audio_output_t *aout, bool paused, vlc_tick_t date)
 {
     aout_sys_t *sys = aout->sys;
 
@@ -304,36 +324,28 @@ static void Pause(audio_output_t *aout, bool paused, mtime_t date)
     } else {
         date -= sys->paused;
         msg_Dbg(aout, "resuming after %"PRId64" us", date);
-        sys->paused = VLC_TS_INVALID;
+        sys->paused = VLC_TICK_INVALID;
     }
 }
 
-static void Flush(audio_output_t *p_aout, bool wait)
+static void Flush(audio_output_t *p_aout)
 {
-    struct aout_sys_t * p_sys = p_aout->sys;
+    aout_sys_t * p_sys = p_aout->sys;
     jack_ringbuffer_t *rb = p_sys->p_jack_ringbuffer;
-
-    /* Sleep if wait was requested */
-    if( wait )
-    {
-        mtime_t delay;
-        if (!TimeGet(p_aout, &delay))
-            msleep(delay);
-    }
 
     /* reset ringbuffer read and write pointers */
     jack_ringbuffer_reset(rb);
 }
 
-static int TimeGet(audio_output_t *p_aout, mtime_t *delay)
+static int TimeGet(audio_output_t *p_aout, vlc_tick_t *delay)
 {
-    struct aout_sys_t * p_sys = p_aout->sys;
+    aout_sys_t * p_sys = p_aout->sys;
     jack_ringbuffer_t *rb = p_sys->p_jack_ringbuffer;
     const size_t bytes_per_frame = p_sys->i_channels * sizeof(jack_sample_t);
 
-    *delay = (p_sys->latency +
-            (jack_ringbuffer_read_space(rb) / bytes_per_frame)) *
-        CLOCK_FREQ / p_sys->i_rate;
+    *delay = p_sys->latency +
+            vlc_tick_from_samples(jack_ringbuffer_read_space(rb) / bytes_per_frame,
+                                  p_sys->i_rate);
 
     return 0;
 }
@@ -347,11 +359,11 @@ int Process( jack_nframes_t i_frames, void *p_arg )
     size_t bytes_read = 0;
     size_t frames_read;
     audio_output_t *p_aout = (audio_output_t*) p_arg;
-    struct aout_sys_t *p_sys = p_aout->sys;
+    aout_sys_t *p_sys = p_aout->sys;
 
     /* Get the next audio data buffer unless paused */
 
-    if( p_sys->paused == VLC_TS_INVALID )
+    if( p_sys->paused == VLC_TICK_INVALID )
         frames_from_rb = i_frames;
 
     /* Get the JACK buffers to write to */
@@ -394,7 +406,7 @@ int Process( jack_nframes_t i_frames, void *p_arg )
 static int GraphChange( void *p_arg )
 {
   audio_output_t *p_aout = (audio_output_t*) p_arg;
-  struct aout_sys_t *p_sys = p_aout->sys;
+  aout_sys_t *p_sys = p_aout->sys;
   unsigned int i;
   jack_latency_range_t port_latency;
 
@@ -419,7 +431,7 @@ static int GraphChange( void *p_arg )
 static void Stop( audio_output_t *p_aout )
 {
     int i_error;
-    struct aout_sys_t *p_sys = p_aout->sys;
+    aout_sys_t *p_sys = p_aout->sys;
 
     i_error = jack_deactivate( p_sys->p_jack_client );
     if( i_error )

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes" ?<?vlcprint'>'?>
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 <?vlc --[[
 vim:syntax=lua
 <!--  - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - >
@@ -38,7 +38,7 @@ local statusTable=httprequests.getstatus(false)
 print('<root>\n')
 httprequests.printTableAsXml(statusTable,0)
 
-local item = vlc.input.item()
+local item = vlc.player.item()
 
 --data in the information section is presented in a non-standard way to keep compatibility.
 
@@ -49,7 +49,8 @@ local item = vlc.input.item()
       if item then
         local metas = item:metas()
         for k,v in pairs(metas) do
-          print("<info name='"..httprequests.xmlString(k).."'>"..httprequests.xmlString(v).."</info>")
+          local metadataContent = vlc.strings.convert_xml_special_chars( httprequests.xmlString(v) )
+          print("<info name='"..httprequests.xmlString(k).."'>"..metadataContent.."</info>")
         end
       end
     ?>

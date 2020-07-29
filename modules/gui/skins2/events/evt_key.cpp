@@ -2,7 +2,6 @@
  * evt_key.cpp
  *****************************************************************************
  * Copyright (C) 2003 the VideoLAN team
- * $Id$
  *
  * Authors: Cyril Deguet     <asmax@via.ecp.fr>
  *          Olivier Teulière <ipkiss@via.ecp.fr>
@@ -23,12 +22,12 @@
  *****************************************************************************/
 
 #include "evt_key.hpp"
-#include <vlc_keys.h>
+#include <vlc_actions.h>
 
 
-const string EvtKey::getAsString() const
+const std::string EvtKey::getAsString() const
 {
-    string event = "key";
+    std::string event = "key";
 
     // Add the action
     if( m_action == kDown )
@@ -42,7 +41,7 @@ const string EvtKey::getAsString() const
     char *keyName = vlc_keycode2str( m_key & ~KEY_MODIFIER, true );
     if( keyName )
     {
-        event += (string)":" + keyName;
+        event += std::string(":") + keyName;
         free( keyName );
     }
     else

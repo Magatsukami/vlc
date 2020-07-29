@@ -26,6 +26,7 @@
 #include <vlc_common.h>
 #include <vlc_plugin.h>
 #include <vlc_filter.h>
+#include <vlc_picture.h>
 #include <vlc_cpu.h>
 #include "arm_neon/chroma_neon.h"
 
@@ -33,8 +34,8 @@ static int Open (vlc_object_t *);
 
 vlc_module_begin ()
     set_description (N_("ARM NEON video chroma YUV->RGBA"))
-    set_capability ("video filter2", 250)
-    set_callbacks (Open, NULL)
+    set_capability ("video converter", 250)
+    set_callback(Open)
 vlc_module_end ()
 
 /*
@@ -139,7 +140,8 @@ static int Open (vlc_object_t *obj)
 
     if (((filter->fmt_in.video.i_width | filter->fmt_in.video.i_height) & 1)
      || (filter->fmt_in.video.i_width != filter->fmt_out.video.i_width)
-     || (filter->fmt_in.video.i_height != filter->fmt_out.video.i_height))
+     || (filter->fmt_in.video.i_height != filter->fmt_out.video.i_height)
+     || (filter->fmt_in.video.orientation != filter->fmt_out.video.orientation))
         return VLC_EGENERIC;
 
     switch (filter->fmt_out.video.i_chroma)

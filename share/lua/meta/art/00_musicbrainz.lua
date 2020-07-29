@@ -19,6 +19,10 @@
  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston MA 02110-1301, USA.
 --]]
 
+function descriptor()
+    return { scope="network" }
+end
+
 function try_query(mbid)
     local relquery = "http://mb.videolan.org/ws/2/release/" .. mbid
     local s = vlc.stream( relquery )
@@ -27,8 +31,12 @@ function try_query(mbid)
 
     found, _ = string.find( page, "<artwork>true</artwork>" )
     if found then
-        return "http://coverartarchive.org/release/"..mbid.."/front-500"
+        front, _ = string.find( page, "<front>true</front>" )
+        if front then
+            return "http://coverartarchive.org/release/"..mbid.."/front-500"
+        end
     end
+
     -- FIXME: multiple results may be available
     _, _, asin = string.find( page, "<asin>(%w+)</asin>" )
     if asin then
